@@ -1,0 +1,2 @@
+-- RenameIndex
+ALTER INDEX "PublicAccountDocument_publicAccountId_documentType_createdAt_id" RENAME TO "PublicAccountDocument_publicAccountId_documentType_createdA_idx";

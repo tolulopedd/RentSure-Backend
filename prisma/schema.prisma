@@ -1,0 +1,487 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  AGENT
+  LANDLORD
+  RENTER
+}
+
+enum UserStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum PublicAccountType {
+  RENTER
+  LANDLORD
+  AGENT
+}
+
+enum PublicEntityType {
+  INDIVIDUAL
+  COMPANY
+}
+
+enum PublicAccountStatus {
+  UNVERIFIED
+  ACTIVE
+  DISABLED
+}
+
+enum PropertyMemberRole {
+  LANDLORD
+  AGENT
+}
+
+enum ProposedRenterStatus {
+  PROPOSED
+  SCORE_REQUESTED
+  SCORE_SHARED
+  UNDER_REVIEW
+  DECISION_READY
+}
+
+enum ProposedRenterDecision {
+  APPROVED
+  HOLD
+  DECLINED
+}
+
+enum ProposedRenterActivityType {
+  COMMENT
+  CREATED
+  SCORE_REQUESTED
+  SCORE_FORWARDED
+  DECISION
+  PAYMENT_SCHEDULE_CREATED
+  PAYMENT_SCHEDULE_UPDATED
+  RENTER_PAYMENT_CONFIRMED
+}
+
+enum ScoreRequestStatus {
+  REQUESTED
+  FORWARDED
+  REVIEWED
+}
+
+enum PaymentScheduleType {
+  RENT
+  UTILITY
+  ESTATE_DUE
+}
+
+enum PaymentScheduleStatus {
+  PENDING
+  PAID
+  OVERDUE
+}
+
+enum RenterScoreShareRecipientType {
+  LANDLORD
+  AGENT
+}
+
+enum PublicDocumentType {
+  PASSPORT_PHOTO
+  IDENTITY_DOCUMENT
+  EMPLOYMENT_DOCUMENT
+  PAYSLIP
+  UTILITY_BILL
+  PAYMENT_RECEIPT
+  OTHER
+}
+
+model User {
+  id              String           @id @default(uuid())
+  fullName        String
+  email           String           @unique
+  passwordHash    String
+  role            UserRole
+  status          UserStatus       @default(ACTIVE)
+  locationLabel   String?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  refreshTokens   RefreshToken[]
+  auditLogs       AuditLog[]
+  rentScoreEvents RentScoreEvent[]
+
+  @@index([role])
+  @@index([status])
+}
+
+model PublicAccount {
+  id                 String                @id @default(uuid())
+  accountType        PublicAccountType
+  entityType         PublicEntityType
+  representation     String?
+  firstName          String
+  lastName           String
+  organizationName   String?
+  registrationNumber String?
+  nin                String?
+  ninVerifiedAt      DateTime?
+  bvn                String?
+  bvnVerifiedAt      DateTime?
+  email              String                @unique
+  passwordHash       String
+  phone              String
+  state              String
+  city               String
+  address            String
+  propertyCount      String?
+  portfolioType      String?
+  notes              String?
+  passportPhotoDocumentId String?
+  emailVerifiedAt    DateTime?
+  status             PublicAccountStatus   @default(UNVERIFIED)
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+
+  verificationTokens EmailVerificationToken[]
+  refreshTokens      PublicRefreshToken[]
+  rentScoreEvents    RentScoreEvent[]
+  linkedProperties   PropertyMember[]          @relation("PropertyMemberAccount")
+  createdProperties  Property[]                @relation("PropertyCreator")
+  proposedRenters    ProposedRenter[]          @relation("ProposedRenterRequester")
+  linkedRenterCases  ProposedRenter[]          @relation("LinkedRenterAccount")
+  requestedScores    ScoreRequest[]            @relation("ScoreRequestRequester")
+  forwardedScores    ScoreRequest[]            @relation("ScoreRequestForwardedTo")
+  paymentSchedules   PaymentSchedule[]         @relation("PaymentScheduleCreator")
+  renterDecisions    ProposedRenter[]          @relation("ProposedRenterDecisionBy")
+  proposedRenterActivities ProposedRenterActivity[] @relation("ProposedRenterActivityActor")
+  sentRentScoreShares RenterScoreShare[]       @relation("RenterScoreSharesSent")
+  receivedRentScoreShares RenterScoreShare[]   @relation("RenterScoreSharesReceived")
+  documents          PublicAccountDocument[]   @relation("PublicAccountDocuments")
+  passportPhotoDocument PublicAccountDocument? @relation("PublicAccountPassportPhoto", fields: [passportPhotoDocumentId], references: [id], onDelete: SetNull)
+
+  @@index([accountType])
+  @@index([entityType])
+  @@index([status])
+  @@index([passportPhotoDocumentId])
+}
+
+model PublicAccountDocument {
+  id              String             @id @default(uuid())
+  publicAccountId String
+  documentType    PublicDocumentType
+  fileName        String
+  objectKey       String             @unique
+  mimeType        String
+  fileSize        Int
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  publicAccount   PublicAccount      @relation("PublicAccountDocuments", fields: [publicAccountId], references: [id], onDelete: Cascade)
+  passportPhotoForAccounts PublicAccount[] @relation("PublicAccountPassportPhoto")
+
+  @@index([publicAccountId, documentType, createdAt])
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  userId    String
+  tokenHash String
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model PublicRefreshToken {
+  id              String   @id @default(uuid())
+  publicAccountId String
+  tokenHash       String
+  expiresAt       DateTime
+  revokedAt       DateTime?
+  createdAt       DateTime @default(now())
+
+  publicAccount PublicAccount @relation(fields: [publicAccountId], references: [id], onDelete: Cascade)
+
+  @@index([publicAccountId])
+  @@index([expiresAt])
+}
+
+model EmailVerificationToken {
+  id              String   @id @default(uuid())
+  publicAccountId String
+  tokenHash       String   @unique
+  expiresAt       DateTime
+  consumedAt      DateTime?
+  createdAt       DateTime @default(now())
+
+  publicAccount PublicAccount @relation(fields: [publicAccountId], references: [id], onDelete: Cascade)
+
+  @@index([publicAccountId])
+  @@index([expiresAt])
+}
+
+model AuditLog {
+  id          String   @id @default(uuid())
+  requestId   String?
+  actorUserId String?
+  action      String
+  entity      String
+  entityId    String?
+  meta        Json?
+  createdAt   DateTime @default(now())
+
+  actor User? @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([actorUserId])
+  @@index([action, createdAt])
+}
+
+model RentScorePolicy {
+  id          String          @id @default(uuid())
+  code        String          @unique
+  name        String
+  description String?
+  minScore    Int             @default(0)
+  maxScore    Int             @default(900)
+  isActive    Boolean         @default(true)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  rules       RentScoreRule[]
+
+  @@index([isActive])
+}
+
+model RentScoreRule {
+  id             String           @id @default(uuid())
+  policyId       String
+  code           String
+  name           String
+  description    String?
+  points         Int
+  maxOccurrences Int?
+  isActive       Boolean          @default(true)
+  sortOrder      Int              @default(0)
+  metadata       Json?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  policy         RentScorePolicy  @relation(fields: [policyId], references: [id], onDelete: Cascade)
+  events         RentScoreEvent[]
+
+  @@unique([policyId, code])
+  @@index([policyId, isActive])
+  @@index([sortOrder])
+}
+
+model RentScoreEvent {
+  id               String         @id @default(uuid())
+  publicAccountId  String
+  ruleId           String
+  quantity         Int            @default(1)
+  occurredAt       DateTime       @default(now())
+  recordedByUserId String?
+  sourceNote       String?
+  metadata         Json?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  publicAccount    PublicAccount  @relation(fields: [publicAccountId], references: [id], onDelete: Cascade)
+  rule             RentScoreRule  @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  recordedBy       User?          @relation(fields: [recordedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([publicAccountId, occurredAt])
+  @@index([ruleId, occurredAt])
+  @@index([recordedByUserId])
+}
+
+model RenterScoreShare {
+  id                 String                         @id @default(uuid())
+  publicAccountId    String
+  recipientEmail     String
+  recipientType      RenterScoreShareRecipientType
+  recipientAccountId String?
+  recipientFirstName String?
+  recipientLastName  String?
+  recipientPhone     String?
+  note               String?
+  score              Int
+  maxScore           Int
+  scoreBand          String
+  reportPayload      Json?
+  createdAt          DateTime                       @default(now())
+
+  publicAccount      PublicAccount                  @relation("RenterScoreSharesSent", fields: [publicAccountId], references: [id], onDelete: Cascade)
+  recipientAccount   PublicAccount?                 @relation("RenterScoreSharesReceived", fields: [recipientAccountId], references: [id], onDelete: SetNull)
+
+  @@index([publicAccountId, createdAt])
+  @@index([recipientEmail, createdAt])
+  @@index([recipientAccountId])
+}
+
+model Property {
+  id                 String           @id @default(uuid())
+  name               String
+  ownerName          String
+  landlordEmail      String
+  address            String
+  state              String
+  city               String
+  propertyType       String?
+  bedroomCount       Int              @default(1)
+  bathroomCount      Int              @default(1)
+  toiletCount        Int              @default(1)
+  unitCount          Int              @default(1)
+  createdByAccountId String
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  createdBy          PublicAccount    @relation("PropertyCreator", fields: [createdByAccountId], references: [id], onDelete: Cascade)
+  members            PropertyMember[]
+  units              PropertyUnit[]
+  proposedRenters    ProposedRenter[]
+  paymentSchedules   PaymentSchedule[]
+
+  @@index([createdByAccountId])
+  @@index([landlordEmail])
+  @@index([state, city])
+}
+
+model PropertyUnit {
+  id         String    @id @default(uuid())
+  propertyId String
+  label      String
+  address    String
+  state      String
+  city       String
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  property   Property   @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@index([propertyId, createdAt])
+}
+
+model PropertyMember {
+  id               String             @id @default(uuid())
+  propertyId       String
+  publicAccountId  String
+  role             PropertyMemberRole
+  isPrimary        Boolean            @default(false)
+  addedAt          DateTime           @default(now())
+
+  property         Property           @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  account          PublicAccount      @relation("PropertyMemberAccount", fields: [publicAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([propertyId, publicAccountId, role])
+  @@index([publicAccountId])
+}
+
+model ProposedRenter {
+  id                 String                @id @default(uuid())
+  propertyId         String
+  renterAccountId    String?
+  requestedByAccountId String
+  firstName          String
+  lastName           String
+  organizationName   String?
+  email              String
+  phone              String
+  address            String
+  state              String
+  city               String
+  status             ProposedRenterStatus  @default(PROPOSED)
+  decision           ProposedRenterDecision?
+  decisionAt         DateTime?
+  decisionByAccountId String?
+  decisionNote       String?
+  notes              String?
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+
+  property           Property              @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  renterAccount      PublicAccount?        @relation("LinkedRenterAccount", fields: [renterAccountId], references: [id], onDelete: SetNull)
+  requestedBy        PublicAccount         @relation("ProposedRenterRequester", fields: [requestedByAccountId], references: [id], onDelete: Cascade)
+  decisionBy         PublicAccount?        @relation("ProposedRenterDecisionBy", fields: [decisionByAccountId], references: [id], onDelete: SetNull)
+  scoreRequests      ScoreRequest[]
+  paymentSchedules   PaymentSchedule[]
+  activities         ProposedRenterActivity[]
+
+  @@index([propertyId, status])
+  @@index([renterAccountId])
+  @@index([requestedByAccountId])
+  @@index([decisionByAccountId])
+  @@index([email])
+}
+
+model ScoreRequest {
+  id                  String             @id @default(uuid())
+  proposedRenterId    String
+  requestedByAccountId String
+  forwardedToAccountId String?
+  status              ScoreRequestStatus @default(REQUESTED)
+  notes               String?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+  forwardedAt         DateTime?
+  reviewedAt          DateTime?
+
+  proposedRenter      ProposedRenter     @relation(fields: [proposedRenterId], references: [id], onDelete: Cascade)
+  requestedBy         PublicAccount      @relation("ScoreRequestRequester", fields: [requestedByAccountId], references: [id], onDelete: Cascade)
+  forwardedTo         PublicAccount?     @relation("ScoreRequestForwardedTo", fields: [forwardedToAccountId], references: [id], onDelete: SetNull)
+
+  @@index([proposedRenterId, createdAt])
+  @@index([requestedByAccountId])
+  @@index([forwardedToAccountId])
+}
+
+model PaymentSchedule {
+  id                 String                 @id @default(uuid())
+  proposedRenterId   String
+  propertyId         String
+  createdByAccountId String
+  paymentType        PaymentScheduleType
+  amountNgn          Int
+  dueDate            DateTime
+  status             PaymentScheduleStatus  @default(PENDING)
+  note               String?
+  confirmedByRenterAt DateTime?
+  confirmationNote   String?
+  receiptReference   String?
+  paidAt             DateTime?
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+
+  proposedRenter     ProposedRenter         @relation(fields: [proposedRenterId], references: [id], onDelete: Cascade)
+  property           Property               @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  createdBy          PublicAccount          @relation("PaymentScheduleCreator", fields: [createdByAccountId], references: [id], onDelete: Cascade)
+
+  @@index([proposedRenterId, dueDate])
+  @@index([propertyId, dueDate])
+  @@index([createdByAccountId])
+}
+
+model ProposedRenterActivity {
+  id               String                     @id @default(uuid())
+  proposedRenterId String
+  actorAccountId   String?
+  activityType     ProposedRenterActivityType
+  message          String
+  metadata         Json?
+  createdAt        DateTime                   @default(now())
+
+  proposedRenter   ProposedRenter             @relation(fields: [proposedRenterId], references: [id], onDelete: Cascade)
+  actor            PublicAccount?             @relation("ProposedRenterActivityActor", fields: [actorAccountId], references: [id], onDelete: SetNull)
+
+  @@index([proposedRenterId, createdAt])
+  @@index([actorAccountId])
+  @@index([activityType, createdAt])
+}

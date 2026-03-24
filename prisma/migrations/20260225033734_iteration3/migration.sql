@@ -1,0 +1,3 @@
+-- This migration originally attempted to alter tables that were not yet present
+-- in the migration history. Leaving these statements in place breaks shadow
+-- database replay during `prisma migrate dev`, so they are intentionally removed.
