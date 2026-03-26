@@ -83,6 +83,9 @@ npm run prisma:migrate
 - `JWT_REFRESH_EXPIRES_IN`
 - `APP_WEB_BASE_URL`
 - `APP_API_BASE_URL`
+- `RESEND_API_KEY`
+- `RESEND_FROM_EMAIL`
+- `RESEND_REPLY_TO`
 - `EMAIL_VERIFICATION_EXPIRES_HOURS`
 
 ### Optional development / integration settings

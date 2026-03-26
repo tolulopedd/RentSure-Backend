@@ -8,6 +8,7 @@ import {
   loginWithPassword,
   logout,
   requestPasswordReset,
+  resendPublicAccountVerification,
   rotateRefreshToken,
   signupPublicAccount,
   updateStaffProfile,
@@ -182,6 +183,21 @@ router.post("/auth/request-password-reset", async (req, res, next) => {
     res.json(result);
   } catch (error) {
     next(error instanceof z.ZodError ? new AppError("Invalid password reset request", 400, "VALIDATION_ERROR") : error);
+  }
+});
+
+router.post("/auth/resend-verification", async (req, res, next) => {
+  try {
+    const body = z
+      .object({
+        email: z.string().trim().email()
+      })
+      .parse(req.body);
+
+    const result = await resendPublicAccountVerification(body.email);
+    res.json(result);
+  } catch (error) {
+    next(error instanceof z.ZodError ? new AppError("Invalid resend verification request", 400, "VALIDATION_ERROR") : error);
   }
 });
 

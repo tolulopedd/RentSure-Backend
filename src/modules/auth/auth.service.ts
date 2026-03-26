@@ -9,6 +9,7 @@ import { AppError } from "../../common/errors/AppError";
 import { logger } from "../../common/logger/logger";
 import { ensureRegistrationRentScoreEvent } from "../rent-score/rent-score.service";
 import { createMailPreview } from "../mail-preview/mail-preview.service";
+import { sendTransactionalMail } from "../mail/mail.service";
 
 type AccountScope = "STAFF" | "PUBLIC";
 
@@ -128,11 +129,8 @@ function buildVerificationUrl(rawToken: string) {
 }
 
 async function sendVerificationLink(email: string, verificationUrl: string) {
-  const preview = createMailPreview({
-    category: "EMAIL_VERIFICATION",
-    to: email,
-    subject: "Verify your email and finish your RentSure signup",
-    html: `
+  const subject = "Verify your email and finish your RentSure signup";
+  const html = `
       <div style="font-family: Arial, sans-serif; color: #0f172a;">
         <p style="font-size: 14px; color: #475569;">Hello,</p>
         <p style="font-size: 14px; line-height: 1.7; color: #334155;">
@@ -148,7 +146,12 @@ async function sendVerificationLink(email: string, verificationUrl: string) {
           <a href="${verificationUrl}" style="color: #1d4ed8;">${verificationUrl}</a>
         </p>
       </div>
-    `
+    `;
+  const delivery = await sendTransactionalMail({
+    category: "EMAIL_VERIFICATION",
+    to: email,
+    subject,
+    html
   });
 
   logger.info(
@@ -156,12 +159,13 @@ async function sendVerificationLink(email: string, verificationUrl: string) {
       event: "auth.email_verification",
       email,
       verificationUrl,
-      previewUrl: preview.previewUrl
+      previewUrl: delivery.previewUrl || null,
+      deliveryMode: delivery.deliveryMode
     },
     "Email verification link generated"
   );
 
-  return preview;
+  return delivery;
 }
 
 async function createStaffSession(user: User) {
@@ -345,7 +349,39 @@ export async function signupPublicAccount(input: PublicSignupInput) {
       ? {}
       : {
           verificationPreviewUrl: verificationUrl,
-          verificationEmailPreviewUrl: verificationEmail.previewUrl
+          verificationEmailPreviewUrl: verificationEmail.previewUrl || undefined
+        })
+  };
+}
+
+export async function resendPublicAccountVerification(emailInput: string) {
+  const email = normalizeEmail(emailInput);
+  const account = await prisma.publicAccount.findUnique({
+    where: { email }
+  });
+
+  if (!account || account.status === "DISABLED" || account.emailVerifiedAt) {
+    return {
+      success: true,
+      email,
+      alreadyVerified: Boolean(account?.emailVerifiedAt)
+    };
+  }
+
+  const { rawToken, expiresAt } = await issueVerificationToken(account.id);
+  const verificationUrl = buildVerificationUrl(rawToken);
+  const verificationEmail = await sendVerificationLink(account.email, verificationUrl);
+
+  return {
+    success: true,
+    email: account.email,
+    alreadyVerified: false,
+    verificationExpiresAt: expiresAt.toISOString(),
+    ...(process.env.NODE_ENV === "production"
+      ? {}
+      : {
+          verificationPreviewUrl: verificationUrl,
+          verificationEmailPreviewUrl: verificationEmail.previewUrl || undefined
         })
   };
 }
