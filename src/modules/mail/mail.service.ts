@@ -47,7 +47,8 @@ export async function sendTransactionalMail(input: {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${env.RESEND_API_KEY}`
+      Authorization: `Bearer ${env.RESEND_API_KEY}`,
+      "User-Agent": "rentsure-backend/1.0"
     },
     body: JSON.stringify({
       from: env.RESEND_FROM_EMAIL,
