@@ -10,15 +10,21 @@ import { prisma } from "../../prisma/client";
 import { AppError } from "../../common/errors/AppError";
 import { logger } from "../../common/logger/logger";
 import { env } from "../../config/env";
-import { buildRentScoreSnapshot } from "../rent-score/rent-score.service";
-import { attachPassportPhotoToPublicAccount, toPublicDocumentAsset } from "../storage/storage.service";
-import { createMailPreview } from "../mail-preview/mail-preview.service";
+import { buildRentScoreSnapshot, recordRentScoreEvent } from "../rent-score/rent-score.service";
+import { attachPassportPhotoToPublicAccount, buildPublicDocumentViewUrl, toPublicDocumentAsset } from "../storage/storage.service";
+import { sendTransactionalMail } from "../mail/mail.service";
 
 type DbClient = Prisma.TransactionClient | typeof prisma;
 type ProposedRenterDecision = "APPROVED" | "HOLD" | "DECLINED";
+type PaymentTiming = "ON_TIME" | "LATE";
 
 function normalizeEmail(email: string) {
   return email.trim().toLowerCase();
+}
+
+function normalizeOptionalEmail(email?: string | null) {
+  const value = email?.trim();
+  return value ? value.toLowerCase() : null;
 }
 
 function publicAccountDisplayName(account: Pick<PublicAccount, "firstName" | "lastName" | "organizationName">) {
@@ -30,8 +36,12 @@ function propertySummary(property: {
   name: string;
   propertyType?: string | null;
   bedroomCount?: number | null;
+  unitCount?: number | null;
 }) {
   const typeLabel = property.propertyType === "Flats" ? "Flat" : property.propertyType || "Property";
+  if ((property.unitCount || 1) > 1) {
+    return `${property.unitCount} Unit ${typeLabel} at ${property.name}`;
+  }
   const bedroomLabel = `${property.bedroomCount || 1} Bedroom`;
   return `${bedroomLabel} ${typeLabel} at ${property.name}`;
 }
@@ -48,6 +58,10 @@ function addDateByFrequency(date: Date, frequency: "MONTHLY" | "QUARTERLY" | "YE
   }
   next.setFullYear(next.getFullYear() + step);
   return next;
+}
+
+function resolvePaymentTiming(dueDate: Date, paidAt: Date): PaymentTiming {
+  return paidAt.getTime() <= dueDate.getTime() ? "ON_TIME" : "LATE";
 }
 
 function buildRenterInviteUrl(email: string) {
@@ -213,6 +227,8 @@ async function logProposedRenterActivity(input: {
     | "DECISION"
     | "PAYMENT_SCHEDULE_CREATED"
     | "PAYMENT_SCHEDULE_UPDATED"
+    | "PAYMENT_CONFIRMATION_INITIATED"
+    | "PAYMENT_CONFIRMED"
     | "RENTER_PAYMENT_CONFIRMED";
   message: string;
   metadata?: Prisma.JsonObject;
@@ -230,39 +246,66 @@ async function logProposedRenterActivity(input: {
   });
 }
 
+async function createPublicAccountNotification(input: {
+  publicAccountId: string;
+  notificationType: "PROPERTY_LINKED";
+  title: string;
+  message: string;
+  ctaLabel?: string;
+  ctaPath?: string;
+  metadata?: Prisma.JsonObject;
+  tx?: DbClient;
+}) {
+  const client = input.tx ?? prisma;
+  await client.publicAccountNotification.create({
+    data: {
+      publicAccountId: input.publicAccountId,
+      notificationType: input.notificationType,
+      title: input.title,
+      message: input.message,
+      ctaLabel: input.ctaLabel ?? null,
+      ctaPath: input.ctaPath ?? null,
+      metadata: input.metadata
+    }
+  });
+}
+
 async function notifyProposedRenter(input: {
   requestedByAccountId: string;
+  requestedByName: string;
   propertySummaryLabel: string;
   renterEmail: string;
   renterName: string;
   existingAccountId?: string | null;
+  tx?: DbClient;
 }) {
   const isExistingMember = Boolean(input.existingAccountId);
-  const actionUrl = `${env.APP_WEB_BASE_URL.replace(/\/+$/, "")}${isExistingMember ? "/account/renter/queue" : "/signup"}`;
-  const preview = createMailPreview({
+  const actionPath = isExistingMember ? "/account/renter/queue" : `/signup?track=RENTER&email=${encodeURIComponent(input.renterEmail)}`;
+  const actionUrl = `${env.APP_WEB_BASE_URL.replace(/\/+$/, "")}${actionPath}`;
+  const delivery = await sendTransactionalMail({
     category: isExistingMember ? "RENTER_NOTIFICATION" : "RENTER_INVITE",
     to: input.renterEmail,
-    subject: isExistingMember ? "A property has been linked to your RentSure profile" : "Complete your RentSure renter profile",
+    subject: isExistingMember ? "A landlord linked a property to your RentSure account" : "A landlord is waiting for your RentSure signup",
     html: `
       <div style="font-family: Arial, sans-serif; color: #0f172a;">
         <p style="font-size: 14px; color: #475569;">Hello ${input.renterName || "there"},</p>
         <p style="font-size: 14px; line-height: 1.7; color: #334155;">
           ${
             isExistingMember
-              ? `A landlord or agent has linked you to <strong>${input.propertySummaryLabel}</strong> on RentSure.`
-              : `A landlord or agent has proposed you for <strong>${input.propertySummaryLabel}</strong> on RentSure.`
+              ? `<strong>${input.requestedByName}</strong> linked you to <strong>${input.propertySummaryLabel}</strong> on RentSure.`
+              : `<strong>${input.requestedByName}</strong> linked you to <strong>${input.propertySummaryLabel}</strong> and is waiting for your renter setup on RentSure.`
           }
         </p>
         <p style="font-size: 14px; line-height: 1.7; color: #334155;">
           ${
             isExistingMember
               ? "Open your renter workspace to review the linked property, rent score progress, and payment schedules."
-              : "Please complete your renter profile within 1-2 days so the property owner can continue your rent score review."
+              : "Join RentSure and complete your renter profile so the landlord decision can continue without delay."
           }
         </p>
         <p style="margin: 28px 0;">
           <a href="${actionUrl}" style="display: inline-block; border-radius: 12px; background: #1d4ed8; color: white; padding: 12px 18px; text-decoration: none; font-weight: 600;">
-            ${isExistingMember ? "Open renter workspace" : "Complete renter profile"}
+            ${isExistingMember ? "Open renter workspace" : "Join RentSure"}
           </a>
         </p>
       </div>
@@ -270,6 +313,20 @@ async function notifyProposedRenter(input: {
   });
 
   if (input.existingAccountId) {
+    await createPublicAccountNotification({
+      publicAccountId: input.existingAccountId,
+      notificationType: "PROPERTY_LINKED",
+      title: "A landlord linked you to a property",
+      message: `${input.requestedByName} linked you to ${input.propertySummaryLabel}. Review the property and rent score progress in your renter workspace.`,
+      ctaLabel: "Open queue",
+      ctaPath: "/account/renter/queue",
+      metadata: {
+        propertySummaryLabel: input.propertySummaryLabel,
+        requestedByName: input.requestedByName
+      },
+      tx: input.tx
+    });
+
     logger.info(
       {
         event: "workspace.renter_notification",
@@ -277,13 +334,14 @@ async function notifyProposedRenter(input: {
         renterEmail: input.renterEmail,
         requestedByAccountId: input.requestedByAccountId,
         property: input.propertySummaryLabel,
-        previewUrl: preview.previewUrl
+        previewUrl: delivery.previewUrl || null,
+        deliveryMode: delivery.deliveryMode
       },
       "Existing renter linked to proposed renter case"
     );
     return {
       mode: "EXISTING_MEMBER" as const,
-      invitePreviewUrl: process.env.NODE_ENV === "production" ? null : preview.previewUrl
+      invitePreviewUrl: delivery.previewUrl || undefined
     };
   }
 
@@ -296,14 +354,15 @@ async function notifyProposedRenter(input: {
       requestedByAccountId: input.requestedByAccountId,
       property: input.propertySummaryLabel,
       inviteUrl,
-      previewUrl: preview.previewUrl
+      previewUrl: delivery.previewUrl || null,
+      deliveryMode: delivery.deliveryMode
     },
     "Proposed renter invite generated"
   );
 
   return {
     mode: "NEW_INVITE" as const,
-    invitePreviewUrl: process.env.NODE_ENV === "production" ? null : preview.previewUrl
+    invitePreviewUrl: delivery.previewUrl || undefined
   };
 }
 
@@ -527,6 +586,10 @@ export async function listWorkspaceProperties(publicAccountId: string) {
       bathroomCount: entry.property.bathroomCount,
       toiletCount: entry.property.toiletCount,
       unitCount: entry.property.unitCount,
+      isOccupied: entry.property.isOccupied,
+      currentTenantName: entry.property.currentTenantName,
+      currentTenantEmail: entry.property.currentTenantEmail,
+      currentTenantPhone: entry.property.currentTenantPhone,
       membershipRole: entry.role,
       createdAt: entry.property.createdAt,
       members: entry.property.members.map(memberSummary),
@@ -536,7 +599,13 @@ export async function listWorkspaceProperties(publicAccountId: string) {
         label: unit.label,
         address: unit.address,
         city: unit.city,
-        state: unit.state
+        state: unit.state,
+        bedroomCount: unit.bedroomCount,
+        bathroomCount: unit.bathroomCount,
+        isOccupied: unit.isOccupied,
+        currentTenantName: unit.currentTenantName,
+        currentTenantEmail: unit.currentTenantEmail,
+        currentTenantPhone: unit.currentTenantPhone
       }))
     }))
   };
@@ -550,13 +619,17 @@ export async function createWorkspaceProperty(input: {
   propertyType: string;
   bedroomCount: number;
   bathroomCount: number;
-  toiletCount: number;
-  unitCount: number;
+  address: string;
+  state: string;
+  city: string;
   units: Array<{
     label: string;
-    address: string;
-    state: string;
-    city: string;
+    bedroomCount: number;
+    bathroomCount: number;
+    isOccupied: boolean;
+    currentTenantName?: string;
+    currentTenantEmail?: string;
+    currentTenantPhone?: string;
   }>;
 }) {
   return prisma.$transaction(async (tx) => {
@@ -574,12 +647,19 @@ export async function createWorkspaceProperty(input: {
       throw new AppError("Landlord properties must be linked to your verified landlord email", 400, "INVALID_LANDLORD_EMAIL");
     }
 
+    const propertyAddress = input.address.trim();
+    const propertyState = input.state.trim();
+    const propertyCity = input.city.trim();
     const normalizedUnits = input.units.map((unit, index) => ({
       label: unit.label.trim() || `Unit ${index + 1}`,
-      address: unit.address.trim(),
-      state: unit.state.trim(),
-      city: unit.city.trim()
+      bedroomCount: unit.bedroomCount,
+      bathroomCount: unit.bathroomCount,
+      isOccupied: unit.isOccupied,
+      currentTenantName: unit.isOccupied ? unit.currentTenantName?.trim() || null : null,
+      currentTenantEmail: unit.isOccupied ? normalizeOptionalEmail(unit.currentTenantEmail) : null,
+      currentTenantPhone: unit.isOccupied ? unit.currentTenantPhone?.trim() || null : null
     }));
+    const occupiedUnits = normalizedUnits.filter((unit) => unit.isOccupied);
     const primaryUnit = normalizedUnits[0];
 
     const property = await tx.property.create({
@@ -587,14 +667,18 @@ export async function createWorkspaceProperty(input: {
         name: input.name.trim(),
         ownerName: input.ownerName.trim(),
         landlordEmail: normalizedLandlordEmail,
-        address: primaryUnit.address,
-        state: primaryUnit.state,
-        city: primaryUnit.city,
+        address: propertyAddress,
+        state: propertyState,
+        city: propertyCity,
         propertyType: input.propertyType.trim(),
-        bedroomCount: input.bedroomCount,
-        bathroomCount: input.bathroomCount,
-        toiletCount: input.toiletCount,
-        unitCount: input.unitCount,
+        bedroomCount: primaryUnit?.bedroomCount ?? input.bedroomCount,
+        bathroomCount: primaryUnit?.bathroomCount ?? input.bathroomCount,
+        toiletCount: primaryUnit?.bathroomCount ?? input.bathroomCount,
+        unitCount: normalizedUnits.length,
+        isOccupied: occupiedUnits.length > 0,
+        currentTenantName: occupiedUnits.length === 1 ? occupiedUnits[0]?.currentTenantName ?? null : null,
+        currentTenantEmail: occupiedUnits.length === 1 ? occupiedUnits[0]?.currentTenantEmail ?? null : null,
+        currentTenantPhone: occupiedUnits.length === 1 ? occupiedUnits[0]?.currentTenantPhone ?? null : null,
         createdByAccountId: input.publicAccountId
       }
     });
@@ -643,9 +727,15 @@ export async function createWorkspaceProperty(input: {
       data: normalizedUnits.map((unit) => ({
         propertyId: property.id,
         label: unit.label,
-        address: unit.address,
-        state: unit.state,
-        city: unit.city
+        address: propertyAddress,
+        state: propertyState,
+        city: propertyCity,
+        bedroomCount: unit.bedroomCount,
+        bathroomCount: unit.bathroomCount,
+        isOccupied: unit.isOccupied,
+        currentTenantName: unit.currentTenantName,
+        currentTenantEmail: unit.currentTenantEmail,
+        currentTenantPhone: unit.currentTenantPhone
       }))
     });
 
@@ -726,6 +816,10 @@ export async function listWorkspaceQueue(publicAccountId: string) {
         },
         orderBy: { createdAt: "desc" }
       },
+      rentScorePayments: {
+        orderBy: { createdAt: "desc" },
+        take: 1
+      },
       paymentSchedules: {
         orderBy: { dueDate: "asc" },
         take: 4
@@ -778,12 +872,25 @@ export async function listWorkspaceQueue(publicAccountId: string) {
               forwardedTo: item.scoreRequests[0].forwardedTo ? publicAccountDisplayName(item.scoreRequests[0].forwardedTo) : null
             }
           : null,
+        latestRentScorePayment: item.rentScorePayments[0]
+          ? {
+              id: item.rentScorePayments[0].id,
+              provider: item.rentScorePayments[0].provider,
+              status: item.rentScorePayments[0].status,
+              amountNgn: item.rentScorePayments[0].amountNgn,
+              reference: item.rentScorePayments[0].reference,
+              createdAt: item.rentScorePayments[0].createdAt
+            }
+          : null,
         paymentSchedules: item.paymentSchedules.map((schedule: any) => ({
           id: schedule.id,
           paymentType: schedule.paymentType,
           amountNgn: schedule.amountNgn,
           dueDate: schedule.dueDate,
-          status: schedule.status
+          status: schedule.status,
+          confirmationInitiatedAt: schedule.confirmationInitiatedAt,
+          confirmedAt: schedule.confirmedAt,
+          confirmationTiming: schedule.confirmationTiming
         })),
         createdAt: item.createdAt
       }))
@@ -853,7 +960,7 @@ export async function searchWorkspaceRenters(input: {
 export async function getWorkspaceQueueItem(publicAccountId: string, proposedRenterId: string, tx: DbClient = prisma) {
   const item = await getAccessibleProposedRenter(publicAccountId, proposedRenterId, tx);
 
-  const [scoreRequests, paymentSchedules, linkedRentScore] = await Promise.all([
+  const [scoreRequests, paymentSchedules, latestRentScorePayment, linkedRentScore] = await Promise.all([
     tx.scoreRequest.findMany({
       where: { proposedRenterId },
       include: {
@@ -865,9 +972,15 @@ export async function getWorkspaceQueueItem(publicAccountId: string, proposedRen
     tx.paymentSchedule.findMany({
       where: { proposedRenterId },
       include: {
-        createdBy: true
+        createdBy: true,
+        confirmationInitiatedBy: true,
+        confirmedBy: true
       },
       orderBy: [{ dueDate: "asc" }, { createdAt: "desc" }]
+    }),
+    tx.rentScorePayment.findFirst({
+      where: { proposedRenterId },
+      orderBy: { createdAt: "desc" }
     }),
     mapLinkedRentScore(item.renterAccountId)
   ]);
@@ -942,6 +1055,24 @@ export async function getWorkspaceQueueItem(publicAccountId: string, proposedRen
           }
         : null
     })),
+    latestRentScorePayment: latestRentScorePayment
+      ? {
+          id: latestRentScorePayment.id,
+          provider: latestRentScorePayment.provider,
+          status: latestRentScorePayment.status,
+          amountNgn: latestRentScorePayment.amountNgn,
+          currency: latestRentScorePayment.currency,
+          reference: latestRentScorePayment.reference,
+          checkoutUrl: latestRentScorePayment.checkoutUrl,
+          manualTransferReference: latestRentScorePayment.manualTransferReference,
+          notes: latestRentScorePayment.notes,
+          createdAt: latestRentScorePayment.createdAt,
+          manualTransfer:
+            latestRentScorePayment.provider === "MANUAL_TRANSFER" && latestRentScorePayment.metadata && typeof latestRentScorePayment.metadata === "object"
+              ? latestRentScorePayment.metadata
+              : null
+        }
+      : null,
     paymentSchedules: paymentSchedules.map((schedule) => ({
       id: schedule.id,
       paymentType: schedule.paymentType,
@@ -950,6 +1081,33 @@ export async function getWorkspaceQueueItem(publicAccountId: string, proposedRen
       status: schedule.status,
       note: schedule.note,
       paidAt: schedule.paidAt,
+      confirmationNote: schedule.confirmationNote,
+      receiptReference: schedule.receiptReference,
+      paymentEvidenceObjectKey: schedule.paymentEvidenceObjectKey,
+      paymentEvidenceFileName: schedule.paymentEvidenceFileName,
+      paymentEvidenceMimeType: schedule.paymentEvidenceMimeType,
+      paymentEvidenceFileSize: schedule.paymentEvidenceFileSize,
+      paymentEvidenceUploadedAt: schedule.paymentEvidenceUploadedAt,
+      paymentEvidenceViewUrl: schedule.paymentEvidenceObjectKey ? buildPublicDocumentViewUrl(schedule.paymentEvidenceObjectKey) : null,
+      confirmationInitiatedAt: schedule.confirmationInitiatedAt,
+      confirmationInitiatedBy: schedule.confirmationInitiatedBy
+        ? {
+            id: schedule.confirmationInitiatedBy.id,
+            name: publicAccountDisplayName(schedule.confirmationInitiatedBy),
+            email: schedule.confirmationInitiatedBy.email,
+            accountType: schedule.confirmationInitiatedBy.accountType
+          }
+        : null,
+      confirmedAt: schedule.confirmedAt,
+      confirmedBy: schedule.confirmedBy
+        ? {
+            id: schedule.confirmedBy.id,
+            name: publicAccountDisplayName(schedule.confirmedBy),
+            email: schedule.confirmedBy.email,
+            accountType: schedule.confirmedBy.accountType
+          }
+        : null,
+      confirmationTiming: schedule.confirmationTiming,
       createdBy: {
         id: schedule.createdBy.id,
         name: publicAccountDisplayName(schedule.createdBy),
@@ -990,6 +1148,8 @@ export async function createWorkspaceProposedRenter(input: {
 }) {
   return prisma.$transaction(async (tx) => {
     const membership = await getPropertyMembership(input.publicAccountId, input.propertyId, tx);
+    const requestedByMember = membership.property.members.find((member) => member.publicAccountId === input.publicAccountId);
+    const requestedByName = requestedByMember ? publicAccountDisplayName(requestedByMember.account) : "A landlord";
 
     const matchedAccount = input.renterAccountId
       ? await tx.publicAccount.findUnique({
@@ -1042,10 +1202,12 @@ export async function createWorkspaceProposedRenter(input: {
 
     const inviteState = await notifyProposedRenter({
       requestedByAccountId: input.publicAccountId,
+      requestedByName,
       propertySummaryLabel: propertySummary(membership.property),
       renterEmail,
       renterName,
-      existingAccountId: linkedAccount?.status === "ACTIVE" ? linkedAccount.id : null
+      existingAccountId: linkedAccount?.status === "ACTIVE" ? linkedAccount.id : null,
+      tx
     });
 
     await logProposedRenterActivity({
@@ -1149,6 +1311,7 @@ export async function resendPendingRenterInvite(input: {
 
   const inviteState = await notifyProposedRenter({
     requestedByAccountId: input.adminUserId,
+    requestedByName: "RentSure admin",
     propertySummaryLabel: propertySummary(proposedRenter.property),
     renterEmail: proposedRenter.email,
     renterName: proposedRenter.organizationName || `${proposedRenter.firstName} ${proposedRenter.lastName}`.trim(),
@@ -1220,34 +1383,11 @@ export async function requestWorkspaceRentScore(input: {
   proposedRenterId: string;
   notes?: string;
 }) {
-  return prisma.$transaction(async (tx) => {
-    const proposedRenter = await getAccessibleProposedRenter(input.publicAccountId, input.proposedRenterId, tx);
-
-    await tx.scoreRequest.create({
-      data: {
-        proposedRenterId: proposedRenter.id,
-        requestedByAccountId: input.publicAccountId,
-        notes: input.notes?.trim() || null,
-        status: "REQUESTED"
-      }
-    });
-
-    await logProposedRenterActivity({
-      proposedRenterId: proposedRenter.id,
-      actorAccountId: input.publicAccountId,
-      activityType: "SCORE_REQUESTED",
-      message: "Rent score review requested for this renter.",
-      metadata: input.notes?.trim() ? ({ note: input.notes.trim() } as Prisma.JsonObject) : undefined,
-      tx
-    });
-
-    await tx.proposedRenter.update({
-      where: { id: proposedRenter.id },
-      data: { status: "SCORE_REQUESTED" }
-    });
-
-    return getWorkspaceQueueItem(input.publicAccountId, proposedRenter.id, tx);
-  });
+  throw new AppError(
+    "Payment is required before requesting a rent score. Start a payment session instead.",
+    400,
+    "PAYMENT_REQUIRED"
+  );
 }
 
 export async function forwardWorkspaceScoreRequest(input: {
@@ -1453,6 +1593,97 @@ export async function updateWorkspacePaymentSchedule(input: {
       metadata: {
         paymentScheduleId: schedule.id,
         status: input.status
+      } as Prisma.JsonObject,
+      tx
+    });
+
+    return getWorkspaceQueueItem(input.publicAccountId, schedule.proposedRenterId, tx);
+  });
+}
+
+export async function confirmWorkspacePaymentSchedule(input: {
+  publicAccountId: string;
+  paymentScheduleId: string;
+  paidAt?: Date | null;
+  note?: string;
+}) {
+  return prisma.$transaction(async (tx) => {
+    const actor = await getWorkspaceAccount(input.publicAccountId, tx);
+    const schedule = await tx.paymentSchedule.findFirst({
+      where: {
+        id: input.paymentScheduleId,
+        property: {
+          members: {
+            some: {
+              publicAccountId: input.publicAccountId
+            }
+          }
+        }
+      }
+    });
+
+    if (!schedule) {
+      throw new AppError("Payment schedule not found", 404, "PAYMENT_SCHEDULE_NOT_FOUND");
+    }
+
+    if (!schedule.confirmationInitiatedAt) {
+      throw new AppError("Await renter proof of payment before confirming this schedule", 400, "PAYMENT_CONFIRMATION_NOT_READY");
+    }
+
+    const paidAt = input.paidAt ?? schedule.paidAt ?? new Date();
+    const timing = resolvePaymentTiming(schedule.dueDate, paidAt);
+
+    await tx.paymentSchedule.update({
+      where: { id: schedule.id },
+      data: {
+        status: "PAID",
+        paidAt,
+        confirmedAt: new Date(),
+        confirmedByAccountId: input.publicAccountId,
+        confirmationTiming: timing,
+        confirmationNote: input.note?.trim() || schedule.confirmationNote || null
+      }
+    });
+
+    const linkedRenterAccountId = await tx.proposedRenter
+      .findUnique({
+        where: { id: schedule.proposedRenterId },
+        select: { renterAccountId: true }
+      })
+      .then((item) => item?.renterAccountId || null);
+
+    if (actor.accountType === "LANDLORD" && linkedRenterAccountId) {
+      if (schedule.paymentType === "RENT" && timing === "ON_TIME") {
+        await recordRentScoreEvent({
+          publicAccountId: linkedRenterAccountId,
+          ruleCode: "RENT_PAID_ON_TIME",
+          quantity: 1,
+          sourceNote: "Landlord confirmed on-time rent payment"
+        });
+      }
+
+      if (schedule.paymentType === "UTILITY" && timing === "ON_TIME") {
+        await recordRentScoreEvent({
+          publicAccountId: linkedRenterAccountId,
+          ruleCode: "CONSISTENT_UTILITY_PAYMENT",
+          quantity: 1,
+          sourceNote: "Landlord confirmed on-time utility payment"
+        });
+      }
+    }
+
+    await logProposedRenterActivity({
+      proposedRenterId: schedule.proposedRenterId,
+      actorAccountId: input.publicAccountId,
+      activityType: "PAYMENT_CONFIRMED",
+      message:
+        actor.accountType === "LANDLORD"
+          ? `Landlord confirmed payment as ${timing === "ON_TIME" ? "on time" : "late"}.`
+          : "Payment confirmed by workspace.",
+      metadata: {
+        paymentScheduleId: schedule.id,
+        confirmedBy: actor.accountType,
+        timing
       } as Prisma.JsonObject,
       tx
     });

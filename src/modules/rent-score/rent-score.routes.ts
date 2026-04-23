@@ -6,6 +6,7 @@ import { writeAuditLog } from "../../common/audit/audit";
 import { requireAuth } from "../../middleware/auth.middleware";
 import { requireRole } from "../../middleware/role.middleware";
 import { listPendingRenterInvites, resendPendingRenterInvite } from "../workspace/workspace.service";
+import { confirmManualRentScorePayment, listManualRentScorePayments } from "../score-payments/score-payments.service";
 import {
   createRentScoreRule,
   deleteRentScoreEvent,
@@ -76,6 +77,46 @@ const eventCreateSchema = z
   .refine((data) => Boolean(data.ruleId || data.ruleCode), {
     message: "ruleId or ruleCode is required"
   });
+
+router.get(
+  "/admin/rent-score/payments/manual",
+  requireAuth,
+  requireRole("ADMIN"),
+  async (_req, res, next) => {
+    try {
+      const result = await listManualRentScorePayments();
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+router.post(
+  "/admin/rent-score/payments/manual/:paymentId/confirm",
+  requireAuth,
+  requireRole("ADMIN"),
+  async (req, res, next) => {
+    try {
+      const params = z.object({ paymentId: z.string().uuid() }).parse(req.params);
+      const result = await confirmManualRentScorePayment({
+        adminUserId: req.user!.userId,
+        paymentId: params.paymentId
+      });
+
+      await writeAuditLog({
+        req,
+        action: "rent_score.payment.manual_confirm",
+        entity: "RentScorePayment",
+        entityId: params.paymentId
+      });
+
+      res.json(result);
+    } catch (error) {
+      next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid manual payment confirmation request", 400, "VALIDATION_ERROR") : error);
+    }
+  }
+);
 
 router.get(
   "/admin/rent-score/config",

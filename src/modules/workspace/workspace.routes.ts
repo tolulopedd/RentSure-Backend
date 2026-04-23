@@ -5,6 +5,7 @@ import { requireAuth } from "../../middleware/auth.middleware";
 import { requirePublicRole } from "../../middleware/public-role.middleware";
 import {
   commentOnWorkspaceProposedRenter,
+  confirmWorkspacePaymentSchedule,
   createWorkspacePaymentSchedule,
   createWorkspaceProperty,
   createWorkspaceProposedRenter,
@@ -22,6 +23,7 @@ import {
   updateWorkspaceProfile,
   updateWorkspacePaymentSchedule
 } from "./workspace.service";
+import { createRentScorePaymentSession, verifyRentScorePayment } from "../score-payments/score-payments.service";
 
 const router = Router();
 
@@ -32,16 +34,38 @@ const propertySchema = z.object({
   propertyType: z.enum(["Duplex", "Flats", "Self Contain", "Mansion", "Boys Quater"]),
   bedroomCount: z.number().int().min(1).max(100),
   bathroomCount: z.number().int().min(1).max(100),
-  toiletCount: z.number().int().min(1).max(100),
-  unitCount: z.number().int().min(1).max(500),
-  units: z.array(
-    z.object({
-      label: z.string().trim().min(1).max(120),
-      address: z.string().trim().min(5).max(240),
-      state: z.string().trim().min(2).max(120),
-      city: z.string().trim().min(2).max(120)
-    })
-  ).min(1).max(500)
+  address: z.string().trim().min(5).max(240),
+  state: z.string().trim().min(2).max(120),
+  city: z.string().trim().min(2).max(120),
+  units: z.array(z.object({
+    label: z.string().trim().min(1).max(120),
+    bedroomCount: z.number().int().min(1).max(100),
+    bathroomCount: z.number().int().min(1).max(100),
+    isOccupied: z.boolean().default(false),
+    currentTenantName: z.string().trim().max(160).optional(),
+    currentTenantEmail: z.string().trim().email().optional().or(z.literal("")),
+    currentTenantPhone: z.string().trim().max(40).optional()
+  })).min(1).max(500),
+}).superRefine((value, ctx) => {
+  value.units.forEach((unit, index) => {
+    if (!unit.isOccupied) return;
+
+    if (!unit.currentTenantName?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["units", index, "currentTenantName"],
+        message: "Enter the current tenant name"
+      });
+    }
+
+    if (!unit.currentTenantPhone?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["units", index, "currentTenantPhone"],
+        message: "Enter the current tenant phone number"
+      });
+    }
+  });
 });
 
 const sharePropertySchema = z.object({
@@ -64,6 +88,16 @@ const proposedRenterSchema = z.object({
 
 const rentScoreRequestSchema = z.object({
   notes: z.string().trim().max(500).optional()
+});
+
+const rentScorePaymentSessionSchema = z.object({
+  provider: z.enum(["PAYSTACK", "FLUTTERWAVE", "MANUAL_TRANSFER"]),
+  notes: z.string().trim().max(500).optional(),
+  callbackPath: z.string().trim().min(1).max(240).optional()
+});
+
+const rentScorePaymentVerifySchema = z.object({
+  reference: z.string().trim().min(6).max(120)
 });
 
 const forwardScoreSchema = z.object({
@@ -90,6 +124,11 @@ const createPaymentScheduleSchema = z.object({
 const updatePaymentScheduleSchema = z.object({
   status: paymentStatusSchema,
   paidAt: z.coerce.date().nullable().optional()
+});
+
+const confirmWorkspacePaymentSchema = z.object({
+  paidAt: z.coerce.date().nullable().optional(),
+  note: z.string().trim().max(500).optional()
 });
 
 const decisionSchema = z.object({
@@ -185,9 +224,6 @@ router.get("/workspace/properties", async (req, res, next) => {
 router.post("/workspace/properties", async (req, res, next) => {
   try {
     const body = propertySchema.parse(req.body);
-    if (body.unitCount !== body.units.length) {
-      throw new AppError("Number of units must match the number of unit address entries", 400, "VALIDATION_ERROR");
-    }
     const result = await createWorkspaceProperty({
       publicAccountId: req.user!.userId,
       ...body
@@ -279,6 +315,36 @@ router.post("/workspace/queue/:proposedRenterId/score-requests", async (req, res
   }
 });
 
+router.post("/workspace/queue/:proposedRenterId/score-payments", async (req, res, next) => {
+  try {
+    const params = z.object({ proposedRenterId: z.string().uuid() }).parse(req.params);
+    const body = rentScorePaymentSessionSchema.parse(req.body);
+    const result = await createRentScorePaymentSession({
+      publicAccountId: req.user!.userId,
+      proposedRenterId: params.proposedRenterId,
+      provider: body.provider,
+      notes: body.notes,
+      callbackPath: body.callbackPath
+    });
+    res.status(201).json(result);
+  } catch (error) {
+    next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid rent score payment request", 400, "VALIDATION_ERROR") : error);
+  }
+});
+
+router.post("/workspace/score-payments/verify", async (req, res, next) => {
+  try {
+    const body = rentScorePaymentVerifySchema.parse(req.body);
+    const result = await verifyRentScorePayment({
+      publicAccountId: req.user!.userId,
+      reference: body.reference
+    });
+    res.json(result);
+  } catch (error) {
+    next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid rent score payment verification", 400, "VALIDATION_ERROR") : error);
+  }
+});
+
 router.post("/workspace/queue/:proposedRenterId/decision", async (req, res, next) => {
   try {
     const params = z.object({ proposedRenterId: z.string().uuid() }).parse(req.params);
@@ -353,6 +419,22 @@ router.patch("/workspace/payment-schedules/:paymentScheduleId", async (req, res,
     res.json(result);
   } catch (error) {
     next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid payment schedule update", 400, "VALIDATION_ERROR") : error);
+  }
+});
+
+router.post("/workspace/payment-schedules/:paymentScheduleId/confirm", async (req, res, next) => {
+  try {
+    const params = z.object({ paymentScheduleId: z.string().uuid() }).parse(req.params);
+    const body = confirmWorkspacePaymentSchema.parse(req.body);
+    const result = await confirmWorkspacePaymentSchedule({
+      publicAccountId: req.user!.userId,
+      paymentScheduleId: params.paymentScheduleId,
+      paidAt: body.paidAt,
+      note: body.note
+    });
+    res.json(result);
+  } catch (error) {
+    next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid payment confirmation payload", 400, "VALIDATION_ERROR") : error);
   }
 });
 

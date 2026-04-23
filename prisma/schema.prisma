@@ -63,6 +63,8 @@ enum ProposedRenterActivityType {
   DECISION
   PAYMENT_SCHEDULE_CREATED
   PAYMENT_SCHEDULE_UPDATED
+  PAYMENT_CONFIRMATION_INITIATED
+  PAYMENT_CONFIRMED
   RENTER_PAYMENT_CONFIRMED
 }
 
@@ -99,6 +101,25 @@ enum PublicDocumentType {
   OTHER
 }
 
+enum PublicNotificationType {
+  PROPERTY_LINKED
+}
+
+enum RentScorePaymentProvider {
+  PAYSTACK
+  FLUTTERWAVE
+  MANUAL_TRANSFER
+}
+
+enum RentScorePaymentStatus {
+  PENDING
+  PENDING_ACTION
+  AWAITING_MANUAL_CONFIRMATION
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
 model User {
   id              String           @id @default(uuid())
   fullName        String
@@ -112,6 +133,7 @@ model User {
 
   refreshTokens   RefreshToken[]
   auditLogs       AuditLog[]
+  confirmedRentScorePayments RentScorePayment[] @relation("RentScorePaymentConfirmedBy")
   rentScoreEvents RentScoreEvent[]
 
   @@index([role])
@@ -155,12 +177,16 @@ model PublicAccount {
   linkedRenterCases  ProposedRenter[]          @relation("LinkedRenterAccount")
   requestedScores    ScoreRequest[]            @relation("ScoreRequestRequester")
   forwardedScores    ScoreRequest[]            @relation("ScoreRequestForwardedTo")
+  rentScorePayments  RentScorePayment[]        @relation("RentScorePaymentRequestedBy")
   paymentSchedules   PaymentSchedule[]         @relation("PaymentScheduleCreator")
+  initiatedPaymentConfirmations PaymentSchedule[] @relation("PaymentScheduleInitiatedBy")
+  confirmedPaymentSchedules PaymentSchedule[]  @relation("PaymentScheduleConfirmedBy")
   renterDecisions    ProposedRenter[]          @relation("ProposedRenterDecisionBy")
   proposedRenterActivities ProposedRenterActivity[] @relation("ProposedRenterActivityActor")
   sentRentScoreShares RenterScoreShare[]       @relation("RenterScoreSharesSent")
   receivedRentScoreShares RenterScoreShare[]   @relation("RenterScoreSharesReceived")
   documents          PublicAccountDocument[]   @relation("PublicAccountDocuments")
+  notifications      PublicAccountNotification[]
   passportPhotoDocument PublicAccountDocument? @relation("PublicAccountPassportPhoto", fields: [passportPhotoDocumentId], references: [id], onDelete: SetNull)
 
   @@index([accountType])
@@ -184,6 +210,24 @@ model PublicAccountDocument {
   passportPhotoForAccounts PublicAccount[] @relation("PublicAccountPassportPhoto")
 
   @@index([publicAccountId, documentType, createdAt])
+}
+
+model PublicAccountNotification {
+  id              String                 @id @default(uuid())
+  publicAccountId String
+  notificationType PublicNotificationType
+  title           String
+  message         String
+  ctaLabel        String?
+  ctaPath         String?
+  metadata        Json?
+  readAt          DateTime?
+  createdAt       DateTime               @default(now())
+
+  publicAccount   PublicAccount          @relation(fields: [publicAccountId], references: [id], onDelete: Cascade)
+
+  @@index([publicAccountId, createdAt])
+  @@index([publicAccountId, readAt, createdAt])
 }
 
 model RefreshToken {
@@ -340,6 +384,10 @@ model Property {
   bathroomCount      Int              @default(1)
   toiletCount        Int              @default(1)
   unitCount          Int              @default(1)
+  isOccupied         Boolean          @default(false)
+  currentTenantName  String?
+  currentTenantEmail String?
+  currentTenantPhone String?
   createdByAccountId String
   createdAt          DateTime         @default(now())
   updatedAt          DateTime         @updatedAt
@@ -356,14 +404,20 @@ model Property {
 }
 
 model PropertyUnit {
-  id         String    @id @default(uuid())
-  propertyId String
-  label      String
-  address    String
-  state      String
-  city       String
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
+  id                 String    @id @default(uuid())
+  propertyId         String
+  label              String
+  address            String
+  state              String
+  city               String
+  bedroomCount       Int       @default(1)
+  bathroomCount      Int       @default(1)
+  isOccupied         Boolean   @default(false)
+  currentTenantName  String?
+  currentTenantEmail String?
+  currentTenantPhone String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
 
   property   Property   @relation(fields: [propertyId], references: [id], onDelete: Cascade)
 
@@ -412,6 +466,7 @@ model ProposedRenter {
   requestedBy        PublicAccount         @relation("ProposedRenterRequester", fields: [requestedByAccountId], references: [id], onDelete: Cascade)
   decisionBy         PublicAccount?        @relation("ProposedRenterDecisionBy", fields: [decisionByAccountId], references: [id], onDelete: SetNull)
   scoreRequests      ScoreRequest[]
+  rentScorePayments  RentScorePayment[]
   paymentSchedules   PaymentSchedule[]
   activities         ProposedRenterActivity[]
 
@@ -437,10 +492,44 @@ model ScoreRequest {
   proposedRenter      ProposedRenter     @relation(fields: [proposedRenterId], references: [id], onDelete: Cascade)
   requestedBy         PublicAccount      @relation("ScoreRequestRequester", fields: [requestedByAccountId], references: [id], onDelete: Cascade)
   forwardedTo         PublicAccount?     @relation("ScoreRequestForwardedTo", fields: [forwardedToAccountId], references: [id], onDelete: SetNull)
+  payment             RentScorePayment?
 
   @@index([proposedRenterId, createdAt])
   @@index([requestedByAccountId])
   @@index([forwardedToAccountId])
+}
+
+model RentScorePayment {
+  id                   String                   @id @default(uuid())
+  proposedRenterId     String?
+  requestedByAccountId String
+  confirmedByUserId    String?
+  scoreRequestId       String?                  @unique
+  provider             RentScorePaymentProvider
+  status               RentScorePaymentStatus   @default(PENDING)
+  amountNgn            Int
+  currency             String                   @default("NGN")
+  reference            String                   @unique
+  gatewayReference     String?
+  checkoutUrl          String?
+  callbackUrl          String?
+  manualTransferReference String?
+  notes                String?
+  metadata             Json?
+  paidAt               DateTime?
+  verifiedAt           DateTime?
+  confirmedAt          DateTime?
+  createdAt            DateTime                 @default(now())
+  updatedAt            DateTime                 @updatedAt
+
+  proposedRenter       ProposedRenter?          @relation(fields: [proposedRenterId], references: [id], onDelete: Cascade)
+  requestedBy          PublicAccount            @relation("RentScorePaymentRequestedBy", fields: [requestedByAccountId], references: [id], onDelete: Cascade)
+  confirmedBy          User?                    @relation("RentScorePaymentConfirmedBy", fields: [confirmedByUserId], references: [id], onDelete: SetNull)
+  scoreRequest         ScoreRequest?            @relation(fields: [scoreRequestId], references: [id], onDelete: SetNull)
+
+  @@index([proposedRenterId, createdAt])
+  @@index([requestedByAccountId, createdAt])
+  @@index([status, createdAt])
 }
 
 model PaymentSchedule {
@@ -456,6 +545,16 @@ model PaymentSchedule {
   confirmedByRenterAt DateTime?
   confirmationNote   String?
   receiptReference   String?
+  paymentEvidenceObjectKey String?
+  paymentEvidenceFileName String?
+  paymentEvidenceMimeType String?
+  paymentEvidenceFileSize Int?
+  paymentEvidenceUploadedAt DateTime?
+  confirmationInitiatedAt DateTime?
+  confirmationInitiatedByAccountId String?
+  confirmedAt        DateTime?
+  confirmedByAccountId String?
+  confirmationTiming String?
   paidAt             DateTime?
   createdAt          DateTime               @default(now())
   updatedAt          DateTime               @updatedAt
@@ -463,10 +562,14 @@ model PaymentSchedule {
   proposedRenter     ProposedRenter         @relation(fields: [proposedRenterId], references: [id], onDelete: Cascade)
   property           Property               @relation(fields: [propertyId], references: [id], onDelete: Cascade)
   createdBy          PublicAccount          @relation("PaymentScheduleCreator", fields: [createdByAccountId], references: [id], onDelete: Cascade)
+  confirmationInitiatedBy PublicAccount?    @relation("PaymentScheduleInitiatedBy", fields: [confirmationInitiatedByAccountId], references: [id], onDelete: SetNull)
+  confirmedBy        PublicAccount?         @relation("PaymentScheduleConfirmedBy", fields: [confirmedByAccountId], references: [id], onDelete: SetNull)
 
   @@index([proposedRenterId, dueDate])
   @@index([propertyId, dueDate])
   @@index([createdByAccountId])
+  @@index([confirmationInitiatedByAccountId])
+  @@index([confirmedByAccountId])
 }
 
 model ProposedRenterActivity {

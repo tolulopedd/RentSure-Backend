@@ -4,14 +4,17 @@ import { AppError } from "../../common/errors/AppError";
 import { requireAuth } from "../../middleware/auth.middleware";
 import { requirePublicRole } from "../../middleware/public-role.middleware";
 import {
+  createSelfInitiatedRenterPayment,
   confirmRenterPayment,
   getRenterDashboard,
+  initiateRenterPaymentConfirmation,
   saveRenterPassportPhoto,
   searchRenterShareRecipients,
   shareRenterScoreReport,
   updateRenterProfile,
   verifyRenterIdentity
 } from "./renter.service";
+import { createRenterRentScorePaymentSession, verifyRenterRentScorePayment } from "../score-payments/score-payments.service";
 
 const router = Router();
 
@@ -35,8 +38,31 @@ const identitySchema = z.object({
 });
 
 const confirmPaymentSchema = z.object({
+  paidAt: z.coerce.date().optional(),
   receiptReference: z.string().trim().max(120).optional(),
   note: z.string().trim().max(500).optional()
+});
+
+const initiatePaymentConfirmationSchema = z.object({
+  receiptReference: z.string().trim().max(120).optional(),
+  note: z.string().trim().max(500).optional(),
+  paymentEvidenceObjectKey: z.string().trim().min(10).max(500).optional(),
+  paymentEvidenceFileName: z.string().trim().min(1).max(240).optional(),
+  paymentEvidenceMimeType: z.string().trim().min(3).max(120).optional(),
+  paymentEvidenceFileSize: z.number().int().positive().optional()
+});
+
+const initiateDirectPaymentSchema = z.object({
+  linkedCaseId: z.string().uuid(),
+  paymentType: z.enum(["RENT", "UTILITY", "ESTATE_DUE"]),
+  amountNgn: z.number().int().positive(),
+  paidAt: z.coerce.date().optional(),
+  receiptReference: z.string().trim().max(120).optional(),
+  note: z.string().trim().max(500).optional(),
+  paymentEvidenceObjectKey: z.string().trim().min(10).max(500),
+  paymentEvidenceFileName: z.string().trim().min(1).max(240),
+  paymentEvidenceMimeType: z.string().trim().min(3).max(120),
+  paymentEvidenceFileSize: z.number().int().positive()
 });
 
 const shareReportSchema = z.object({
@@ -46,6 +72,15 @@ const shareReportSchema = z.object({
   recipientLastName: z.string().trim().min(1).optional(),
   recipientPhone: z.string().trim().min(3).optional(),
   note: z.string().trim().max(500).optional()
+});
+
+const renterRentScorePaymentSessionSchema = z.object({
+  provider: z.enum(["PAYSTACK", "FLUTTERWAVE", "MANUAL_TRANSFER"]),
+  callbackPath: z.string().trim().min(1).max(240).optional()
+});
+
+const renterRentScorePaymentVerifySchema = z.object({
+  reference: z.string().trim().min(6).max(120)
 });
 
 const passportPhotoSchema = z.object({
@@ -114,12 +149,55 @@ router.post("/renter/payment-schedules/:paymentScheduleId/confirm", async (req, 
     const result = await confirmRenterPayment({
       publicAccountId: req.user!.userId,
       paymentScheduleId: params.paymentScheduleId,
+      paidAt: body.paidAt,
       receiptReference: body.receiptReference,
       note: body.note
     });
     res.json(result);
   } catch (error) {
     next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid payment confirmation", 400, "VALIDATION_ERROR") : error);
+  }
+});
+
+router.post("/renter/payment-schedules/:paymentScheduleId/initiate", async (req, res, next) => {
+  try {
+    const params = z.object({ paymentScheduleId: z.string().uuid() }).parse(req.params);
+    const body = initiatePaymentConfirmationSchema.parse(req.body);
+    const result = await initiateRenterPaymentConfirmation({
+      publicAccountId: req.user!.userId,
+      paymentScheduleId: params.paymentScheduleId,
+      receiptReference: body.receiptReference,
+      note: body.note,
+      paymentEvidenceObjectKey: body.paymentEvidenceObjectKey,
+      paymentEvidenceFileName: body.paymentEvidenceFileName,
+      paymentEvidenceMimeType: body.paymentEvidenceMimeType,
+      paymentEvidenceFileSize: body.paymentEvidenceFileSize
+    });
+    res.json(result);
+  } catch (error) {
+    next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid payment initiation", 400, "VALIDATION_ERROR") : error);
+  }
+});
+
+router.post("/renter/payment-schedules/initiate-self", async (req, res, next) => {
+  try {
+    const body = initiateDirectPaymentSchema.parse(req.body);
+    const result = await createSelfInitiatedRenterPayment({
+      publicAccountId: req.user!.userId,
+      linkedCaseId: body.linkedCaseId,
+      paymentType: body.paymentType,
+      amountNgn: body.amountNgn,
+      paidAt: body.paidAt,
+      receiptReference: body.receiptReference,
+      note: body.note,
+      paymentEvidenceObjectKey: body.paymentEvidenceObjectKey,
+      paymentEvidenceFileName: body.paymentEvidenceFileName,
+      paymentEvidenceMimeType: body.paymentEvidenceMimeType,
+      paymentEvidenceFileSize: body.paymentEvidenceFileSize
+    });
+    res.json(result);
+  } catch (error) {
+    next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid renter payment initiation", 400, "VALIDATION_ERROR") : error);
   }
 });
 
@@ -138,6 +216,41 @@ router.post("/renter/share-report", async (req, res, next) => {
     res.json(result);
   } catch (error) {
     next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid score share request", 400, "VALIDATION_ERROR") : error);
+  }
+});
+
+router.post("/renter/rent-score/payments", async (req, res, next) => {
+  try {
+    const body = renterRentScorePaymentSessionSchema.parse(req.body);
+    const result = await createRenterRentScorePaymentSession({
+      publicAccountId: req.user!.userId,
+      provider: body.provider,
+      callbackPath: body.callbackPath
+    });
+    res.status(201).json(result);
+  } catch (error) {
+    next(
+      error instanceof z.ZodError
+        ? new AppError(error.issues[0]?.message ?? "Invalid renter rent score payment request", 400, "VALIDATION_ERROR")
+        : error
+    );
+  }
+});
+
+router.post("/renter/rent-score/payments/verify", async (req, res, next) => {
+  try {
+    const body = renterRentScorePaymentVerifySchema.parse(req.body);
+    const result = await verifyRenterRentScorePayment({
+      publicAccountId: req.user!.userId,
+      reference: body.reference
+    });
+    res.json(result);
+  } catch (error) {
+    next(
+      error instanceof z.ZodError
+        ? new AppError(error.issues[0]?.message ?? "Invalid renter rent score payment verification", 400, "VALIDATION_ERROR")
+        : error
+    );
   }
 });
 

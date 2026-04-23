@@ -1,8 +1,8 @@
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../../prisma/client";
 import { AppError } from "../../common/errors/AppError";
-import { buildRentScoreSnapshot, ensureSingleRentScoreEvent, recordRentScoreEvent } from "../rent-score/rent-score.service";
-import { attachPassportPhotoToPublicAccount, toPublicDocumentAsset } from "../storage/storage.service";
+import { buildRentScoreSnapshot, ensureSingleRentScoreEvent } from "../rent-score/rent-score.service";
+import { attachPassportPhotoToPublicAccount, buildPublicDocumentViewUrl, toPublicDocumentAsset } from "../storage/storage.service";
 import { createMailPreview } from "../mail-preview/mail-preview.service";
 
 function normalizeEmail(email: string) {
@@ -49,6 +49,20 @@ function isMissingRenterShareRecipientColumn(error: unknown) {
   );
 }
 
+function isMissingPublicAccountNotificationTable(error: unknown) {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "P2021" &&
+    "meta" in error &&
+    typeof error.meta === "object" &&
+    error.meta !== null &&
+    "table" in error.meta &&
+    error.meta.table === "public.PublicAccountNotification"
+  );
+}
+
 async function getRenterAccount(publicAccountId: string) {
   const account = await prisma.publicAccount.findUnique({
     where: { id: publicAccountId },
@@ -76,6 +90,8 @@ async function logRenterActivity(input: {
     | "DECISION"
     | "PAYMENT_SCHEDULE_CREATED"
     | "PAYMENT_SCHEDULE_UPDATED"
+    | "PAYMENT_CONFIRMATION_INITIATED"
+    | "PAYMENT_CONFIRMED"
     | "RENTER_PAYMENT_CONFIRMED";
   message: string;
   metadata?: Prisma.JsonObject;
@@ -191,7 +207,29 @@ export async function getRenterDashboard(publicAccountId: string) {
       throw error;
     });
 
-  const [account, rentScore, linkedCases, shareHistory] = await Promise.all([
+  const notificationsPromise = prisma.publicAccountNotification
+    .findMany({
+      where: { publicAccountId },
+      orderBy: [{ readAt: "asc" }, { createdAt: "desc" }],
+      take: 10
+    })
+    .catch((error: unknown) => {
+      if (isMissingPublicAccountNotificationTable(error)) {
+        return [];
+      }
+      throw error;
+    });
+
+  const rentScorePurchasesPromise = prisma.rentScorePayment.findMany({
+    where: {
+      requestedByAccountId: publicAccountId,
+      proposedRenterId: null
+    },
+    orderBy: { createdAt: "desc" },
+    take: 12
+  });
+
+  const [account, rentScore, linkedCases, shareHistory, notifications, rentScorePurchases] = await Promise.all([
     getRenterAccount(publicAccountId),
     buildRentScoreSnapshot(publicAccountId),
     prisma.proposedRenter.findMany({
@@ -221,7 +259,9 @@ export async function getRenterDashboard(publicAccountId: string) {
       },
       orderBy: { createdAt: "desc" }
     }),
-    shareHistoryPromise
+    shareHistoryPromise,
+    notificationsPromise,
+    rentScorePurchasesPromise
   ]);
 
   const profileCompleteness = [
@@ -257,8 +297,19 @@ export async function getRenterDashboard(publicAccountId: string) {
     summary: {
       activeLinkedCases: linkedCases.length,
       pendingSchedules: linkedCases.flatMap((item) => item.paymentSchedules).filter((schedule) => schedule.status !== "PAID").length,
-      profileCompletenessPercent: Math.round((profileCompleteness / 5) * 100)
+      profileCompletenessPercent: Math.round((profileCompleteness / 5) * 100),
+      unreadNotifications: notifications.filter((item) => !item.readAt).length
     },
+    notifications: notifications.map((notification) => ({
+      id: notification.id,
+      notificationType: notification.notificationType,
+      title: notification.title,
+      message: notification.message,
+      ctaLabel: notification.ctaLabel,
+      ctaPath: notification.ctaPath,
+      readAt: notification.readAt,
+      createdAt: notification.createdAt
+    })),
     shareHistory: shareHistory.map((share) => ({
       id: share.id,
       recipientEmail: share.recipientEmail,
@@ -272,6 +323,28 @@ export async function getRenterDashboard(publicAccountId: string) {
       maxScore: share.maxScore,
       scoreBand: share.scoreBand,
       createdAt: share.createdAt
+    })),
+    rentScorePurchases: rentScorePurchases.map((payment) => ({
+      id: payment.id,
+      provider: payment.provider,
+      status: payment.status,
+      amountNgn: payment.amountNgn,
+      currency: payment.currency,
+      reference: payment.reference,
+      checkoutUrl: payment.checkoutUrl,
+      createdAt: payment.createdAt,
+      paidAt: payment.paidAt,
+      verifiedAt: payment.verifiedAt,
+      manualTransfer:
+        payment.provider === "MANUAL_TRANSFER" && payment.metadata && typeof payment.metadata === "object"
+          ? (payment.metadata as {
+              bankName?: string;
+              accountName?: string;
+              accountNumber?: string;
+              reference?: string;
+              instructions?: string;
+            })
+          : null
     })),
     linkedCases: linkedCases.map((item) => ({
       id: item.id,
@@ -300,6 +373,15 @@ export async function getRenterDashboard(publicAccountId: string) {
         status: schedule.status,
         note: schedule.note,
         confirmedByRenterAt: schedule.confirmedByRenterAt,
+        confirmationInitiatedAt: schedule.confirmationInitiatedAt,
+        confirmedAt: schedule.confirmedAt,
+        confirmationTiming: schedule.confirmationTiming,
+        paymentEvidenceObjectKey: schedule.paymentEvidenceObjectKey,
+        paymentEvidenceFileName: schedule.paymentEvidenceFileName,
+        paymentEvidenceMimeType: schedule.paymentEvidenceMimeType,
+        paymentEvidenceFileSize: schedule.paymentEvidenceFileSize,
+        paymentEvidenceUploadedAt: schedule.paymentEvidenceUploadedAt,
+        paymentEvidenceViewUrl: schedule.paymentEvidenceObjectKey ? buildPublicDocumentViewUrl(schedule.paymentEvidenceObjectKey) : null,
         receiptReference: schedule.receiptReference,
         createdBy: publicAccountDisplayName(schedule.createdBy)
       })),
@@ -390,6 +472,7 @@ export async function verifyRenterIdentity(input: {
 export async function confirmRenterPayment(input: {
   publicAccountId: string;
   paymentScheduleId: string;
+  paidAt?: Date | null;
   receiptReference?: string;
   note?: string;
 }) {
@@ -411,35 +494,21 @@ export async function confirmRenterPayment(input: {
     throw new AppError("Payment schedule not found", 404, "PAYMENT_SCHEDULE_NOT_FOUND");
   }
 
-  const now = new Date();
+  const now = input.paidAt ?? new Date();
+  const timing = now.getTime() <= schedule.dueDate.getTime() ? "ON_TIME" : "LATE";
   await prisma.paymentSchedule.update({
     where: { id: schedule.id },
     data: {
       status: "PAID",
       paidAt: now,
       confirmedByRenterAt: now,
+      confirmedAt: now,
+      confirmedByAccountId: input.publicAccountId,
+      confirmationTiming: timing,
       confirmationNote: input.note?.trim() || null,
       receiptReference: input.receiptReference?.trim() || null
     }
   });
-
-  if (schedule.paymentType === "RENT" && schedule.dueDate >= now) {
-    await recordRentScoreEvent({
-      publicAccountId: input.publicAccountId,
-      ruleCode: "RENT_PAID_ON_TIME",
-      quantity: 1,
-      sourceNote: "Renter confirmed on-time rent payment"
-    });
-  }
-
-  if (schedule.paymentType === "UTILITY" && schedule.dueDate >= now) {
-    await recordRentScoreEvent({
-      publicAccountId: input.publicAccountId,
-      ruleCode: "CONSISTENT_UTILITY_PAYMENT",
-      quantity: 1,
-      sourceNote: "Renter confirmed utility payment"
-    });
-  }
 
   await logRenterActivity({
     proposedRenterId: schedule.proposedRenterId,
@@ -448,6 +517,143 @@ export async function confirmRenterPayment(input: {
     message: `${schedule.paymentType.replaceAll("_", " ")} payment confirmed by renter.`,
     metadata: {
       paymentScheduleId: schedule.id,
+      receiptReference: input.receiptReference?.trim() || null,
+      timing
+    } as Prisma.JsonObject
+  });
+
+  return getRenterDashboard(input.publicAccountId);
+}
+
+export async function initiateRenterPaymentConfirmation(input: {
+  publicAccountId: string;
+  paymentScheduleId: string;
+  receiptReference?: string;
+  note?: string;
+  paymentEvidenceObjectKey?: string;
+  paymentEvidenceFileName?: string;
+  paymentEvidenceMimeType?: string;
+  paymentEvidenceFileSize?: number;
+}) {
+  await getRenterAccount(input.publicAccountId);
+
+  const schedule = await prisma.paymentSchedule.findFirst({
+    where: {
+      id: input.paymentScheduleId,
+      proposedRenter: {
+        renterAccountId: input.publicAccountId
+      }
+    }
+  });
+
+  if (!schedule) {
+    throw new AppError("Payment schedule not found", 404, "PAYMENT_SCHEDULE_NOT_FOUND");
+  }
+
+  if (!input.paymentEvidenceObjectKey && !schedule.paymentEvidenceObjectKey) {
+    throw new AppError("Attach proof of payment before sending to landlord", 400, "VALIDATION_ERROR");
+  }
+
+  const initiatedAt = new Date();
+  await prisma.paymentSchedule.update({
+    where: { id: schedule.id },
+    data: {
+      confirmationInitiatedAt: initiatedAt,
+      confirmationInitiatedByAccountId: input.publicAccountId,
+      confirmationNote: input.note?.trim() || schedule.confirmationNote || null,
+      receiptReference: input.receiptReference?.trim() || schedule.receiptReference || null,
+      paymentEvidenceObjectKey: input.paymentEvidenceObjectKey?.trim() || schedule.paymentEvidenceObjectKey || null,
+      paymentEvidenceFileName: input.paymentEvidenceFileName?.trim() || schedule.paymentEvidenceFileName || null,
+      paymentEvidenceMimeType: input.paymentEvidenceMimeType?.trim() || schedule.paymentEvidenceMimeType || null,
+      paymentEvidenceFileSize: input.paymentEvidenceFileSize ?? schedule.paymentEvidenceFileSize ?? null,
+      paymentEvidenceUploadedAt:
+        input.paymentEvidenceObjectKey || input.paymentEvidenceFileName || input.paymentEvidenceMimeType
+          ? initiatedAt
+          : schedule.paymentEvidenceUploadedAt
+    }
+  });
+
+  await logRenterActivity({
+    proposedRenterId: schedule.proposedRenterId,
+    actorAccountId: input.publicAccountId,
+    activityType: "PAYMENT_CONFIRMATION_INITIATED",
+    message: `${schedule.paymentType.replaceAll("_", " ")} payment confirmation initiated by renter.`,
+    metadata: {
+      paymentScheduleId: schedule.id,
+      hasEvidence: Boolean(input.paymentEvidenceObjectKey),
+      receiptReference: input.receiptReference?.trim() || null
+    } as Prisma.JsonObject
+  });
+
+  return getRenterDashboard(input.publicAccountId);
+}
+
+export async function createSelfInitiatedRenterPayment(input: {
+  publicAccountId: string;
+  linkedCaseId: string;
+  paymentType: "RENT" | "UTILITY" | "ESTATE_DUE";
+  amountNgn: number;
+  paidAt?: Date | null;
+  receiptReference?: string;
+  note?: string;
+  paymentEvidenceObjectKey: string;
+  paymentEvidenceFileName: string;
+  paymentEvidenceMimeType: string;
+  paymentEvidenceFileSize: number;
+}) {
+  await getRenterAccount(input.publicAccountId);
+
+  const linkedCase = await prisma.proposedRenter.findFirst({
+    where: {
+      id: input.linkedCaseId,
+      renterAccountId: input.publicAccountId,
+      decision: { not: "DECLINED" }
+    },
+    include: {
+      property: true
+    }
+  });
+
+  if (!linkedCase) {
+    throw new AppError("Linked property not found for this renter", 404, "LINKED_PROPERTY_NOT_FOUND");
+  }
+
+  const paidAt = input.paidAt ?? new Date();
+
+  await prisma.paymentSchedule.create({
+    data: {
+      proposedRenterId: linkedCase.id,
+      propertyId: linkedCase.propertyId,
+      createdByAccountId: input.publicAccountId,
+      paymentType: input.paymentType,
+      amountNgn: input.amountNgn,
+      dueDate: paidAt,
+      paidAt,
+      status: "PENDING",
+      note: input.note?.trim() || null,
+      confirmedByRenterAt: paidAt,
+      confirmationInitiatedAt: paidAt,
+      confirmationInitiatedByAccountId: input.publicAccountId,
+      confirmationNote: input.note?.trim() || null,
+      receiptReference: input.receiptReference?.trim() || null,
+      paymentEvidenceObjectKey: input.paymentEvidenceObjectKey.trim(),
+      paymentEvidenceFileName: input.paymentEvidenceFileName.trim(),
+      paymentEvidenceMimeType: input.paymentEvidenceMimeType.trim(),
+      paymentEvidenceFileSize: input.paymentEvidenceFileSize,
+      paymentEvidenceUploadedAt: paidAt
+    }
+  });
+
+  await logRenterActivity({
+    proposedRenterId: linkedCase.id,
+    actorAccountId: input.publicAccountId,
+    activityType: "PAYMENT_CONFIRMATION_INITIATED",
+    message: `${input.paymentType.replaceAll("_", " ")} payment submitted by renter for landlord confirmation.`,
+    metadata: {
+      propertyId: linkedCase.propertyId,
+      paymentType: input.paymentType,
+      amountNgn: input.amountNgn,
+      paidAt: paidAt.toISOString(),
       receiptReference: input.receiptReference?.trim() || null
     } as Prisma.JsonObject
   });
