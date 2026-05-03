@@ -8,6 +8,7 @@ import {
   loginWithPassword,
   logout,
   requestPasswordReset,
+  resetPasswordWithToken,
   resendPublicAccountVerification,
   rotateRefreshToken,
   signupPublicAccount,
@@ -183,6 +184,29 @@ router.post("/auth/request-password-reset", async (req, res, next) => {
     res.json(result);
   } catch (error) {
     next(error instanceof z.ZodError ? new AppError("Invalid password reset request", 400, "VALIDATION_ERROR") : error);
+  }
+});
+
+router.post("/auth/reset-password", async (req, res, next) => {
+  try {
+    const body = z
+      .object({
+        token: z.string().min(20),
+        password: strongPasswordSchema
+      })
+      .parse(req.body);
+
+    const result = await resetPasswordWithToken({
+      rawToken: body.token,
+      password: body.password
+    });
+    res.json(result);
+  } catch (error) {
+    next(
+      error instanceof z.ZodError
+        ? new AppError(error.issues[0]?.message ?? "Invalid password reset payload", 400, "VALIDATION_ERROR")
+        : error
+    );
   }
 });
 

@@ -8,7 +8,6 @@ import { env } from "../../config/env";
 import { AppError } from "../../common/errors/AppError";
 import { logger } from "../../common/logger/logger";
 import { ensureRegistrationRentScoreEvent } from "../rent-score/rent-score.service";
-import { createMailPreview } from "../mail-preview/mail-preview.service";
 import { sendTransactionalMail } from "../mail/mail.service";
 
 type AccountScope = "STAFF" | "PUBLIC";
@@ -119,6 +118,40 @@ async function issueVerificationToken(publicAccountId: string) {
   };
 }
 
+async function issuePasswordResetToken(input: { userId?: string; publicAccountId?: string }) {
+  if (!input.userId && !input.publicAccountId) {
+    throw new AppError("Password reset target is required", 500, "TOKEN_ERROR");
+  }
+
+  const ownershipFilters = [];
+  if (input.userId) ownershipFilters.push({ userId: input.userId });
+  if (input.publicAccountId) ownershipFilters.push({ publicAccountId: input.publicAccountId });
+
+  await prisma.passwordResetToken.deleteMany({
+    where: {
+      consumedAt: null,
+      OR: ownershipFilters
+    }
+  });
+
+  const rawToken = crypto.randomBytes(32).toString("hex");
+  const expiresAt = verificationExpiryDate();
+
+  await prisma.passwordResetToken.create({
+    data: {
+      userId: input.userId,
+      publicAccountId: input.publicAccountId,
+      tokenHash: hashVerificationToken(rawToken),
+      expiresAt
+    }
+  });
+
+  return {
+    rawToken,
+    expiresAt
+  };
+}
+
 async function createPendingPasswordHash() {
   return bcrypt.hash(crypto.randomBytes(32).toString("hex"), 12);
 }
@@ -126,6 +159,11 @@ async function createPendingPasswordHash() {
 function buildVerificationUrl(rawToken: string) {
   const base = env.APP_WEB_BASE_URL.replace(/\/+$/, "");
   return `${base}/verify-email?token=${encodeURIComponent(rawToken)}`;
+}
+
+function buildPasswordResetUrl(rawToken: string) {
+  const base = env.APP_WEB_BASE_URL.replace(/\/+$/, "");
+  return `${base}/reset-password?token=${encodeURIComponent(rawToken)}`;
 }
 
 async function sendVerificationLink(email: string, verificationUrl: string) {
@@ -163,6 +201,47 @@ async function sendVerificationLink(email: string, verificationUrl: string) {
       deliveryMode: delivery.deliveryMode
     },
     "Email verification link generated"
+  );
+
+  return delivery;
+}
+
+async function sendPasswordResetLink(email: string, resetUrl: string) {
+  const subject = "Reset your RentSure password";
+  const html = `
+      <div style="font-family: Arial, sans-serif; color: #0f172a;">
+        <p style="font-size: 14px; color: #475569;">Hello,</p>
+        <p style="font-size: 14px; line-height: 1.7; color: #334155;">
+          We received a request to reset the password for your RentSure account.
+        </p>
+        <p style="margin: 28px 0;">
+          <a href="${resetUrl}" style="display: inline-block; border-radius: 12px; background: #1d4ed8; color: white; padding: 12px 18px; text-decoration: none; font-weight: 600;">
+            Reset password
+          </a>
+        </p>
+        <p style="font-size: 13px; line-height: 1.7; color: #475569;">
+          If the button does not work, use this link:<br />
+          <a href="${resetUrl}" style="color: #1d4ed8;">${resetUrl}</a>
+        </p>
+      </div>
+    `;
+
+  const delivery = await sendTransactionalMail({
+    category: "PASSWORD_RESET",
+    to: email,
+    subject,
+    html
+  });
+
+  logger.info(
+    {
+      event: "auth.password_reset_email",
+      email,
+      resetUrl,
+      previewUrl: delivery.previewUrl || null,
+      deliveryMode: delivery.deliveryMode
+    },
+    "Password reset link generated"
   );
 
   return delivery;
@@ -393,36 +472,27 @@ export async function requestPasswordReset(emailInput: string) {
     prisma.publicAccount.findUnique({ where: { email } })
   ]);
 
-  const preview =
-    staffUser || publicAccount
-      ? createMailPreview({
-          category: "PASSWORD_RESET",
-          to: email,
-          subject: "RentSure password reset request",
-          html: `
-            <div style="font-family: Arial, sans-serif; color: #0f172a;">
-              <p style="font-size: 14px; color: #475569;">Hello,</p>
-              <p style="font-size: 14px; line-height: 1.7; color: #334155;">
-                A password reset request was received for your RentSure account.
-              </p>
-              <p style="font-size: 14px; line-height: 1.7; color: #334155;">
-                This development environment captures the reset email as a local preview while live email delivery is still being connected.
-              </p>
-              <p style="margin: 28px 0;">
-                <a href="${env.APP_WEB_BASE_URL.replace(/\/+$/, "")}/login" style="display: inline-block; border-radius: 12px; background: #1d4ed8; color: white; padding: 12px 18px; text-decoration: none; font-weight: 600;">
-                  Return to sign in
-                </a>
-              </p>
-            </div>
-          `
-        })
-      : null;
+  let previewUrl: string | null = null;
+  let resetUrl: string | null = null;
+
+  if (staffUser) {
+    const token = await issuePasswordResetToken({ userId: staffUser.id });
+    resetUrl = buildPasswordResetUrl(token.rawToken);
+    const delivery = await sendPasswordResetLink(staffUser.email, resetUrl);
+    previewUrl = delivery.previewUrl || null;
+  } else if (publicAccount && publicAccount.status !== "DISABLED") {
+    const token = await issuePasswordResetToken({ publicAccountId: publicAccount.id });
+    resetUrl = buildPasswordResetUrl(token.rawToken);
+    const delivery = await sendPasswordResetLink(publicAccount.email, resetUrl);
+    previewUrl = delivery.previewUrl || null;
+  }
 
   logger.info(
     {
       event: "auth.password_reset_requested",
       email,
-      previewUrl: preview?.previewUrl || null
+      previewUrl,
+      resetUrl
     },
     "Password reset request captured"
   );
@@ -430,8 +500,67 @@ export async function requestPasswordReset(emailInput: string) {
   return {
     success: true,
     email,
-    ...(process.env.NODE_ENV === "production" ? {} : { resetEmailPreviewUrl: preview?.previewUrl || null })
+    ...(process.env.NODE_ENV === "production" ? {} : { resetEmailPreviewUrl: previewUrl, resetLinkPreviewUrl: resetUrl })
   };
+}
+
+export async function resetPasswordWithToken(input: { rawToken: string; password: string }) {
+  const tokenHash = hashVerificationToken(input.rawToken.trim());
+  const token = await prisma.passwordResetToken.findUnique({
+    where: { tokenHash },
+    include: {
+      user: true,
+      publicAccount: true
+    }
+  });
+
+  if (!token || token.consumedAt || token.expiresAt <= new Date()) {
+    throw new AppError("This password reset link is invalid or expired", 400, "INVALID_PASSWORD_RESET_TOKEN");
+  }
+
+  const passwordHash = await bcrypt.hash(input.password, 12);
+
+  if (token.userId) {
+    await prisma.$transaction([
+      prisma.user.update({
+        where: { id: token.userId },
+        data: { passwordHash }
+      }),
+      prisma.passwordResetToken.update({
+        where: { id: token.id },
+        data: { consumedAt: new Date() }
+      }),
+      prisma.refreshToken.updateMany({
+        where: {
+          userId: token.userId,
+          revokedAt: null
+        },
+        data: { revokedAt: new Date() }
+      })
+    ]);
+  } else if (token.publicAccountId) {
+    await prisma.$transaction([
+      prisma.publicAccount.update({
+        where: { id: token.publicAccountId },
+        data: { passwordHash }
+      }),
+      prisma.passwordResetToken.update({
+        where: { id: token.id },
+        data: { consumedAt: new Date() }
+      }),
+      prisma.publicRefreshToken.updateMany({
+        where: {
+          publicAccountId: token.publicAccountId,
+          revokedAt: null
+        },
+        data: { revokedAt: new Date() }
+      })
+    ]);
+  } else {
+    throw new AppError("Password reset token is not attached to an account", 500, "TOKEN_ERROR");
+  }
+
+  return { success: true };
 }
 
 export async function verifyPublicAccountEmail(rawToken: string) {

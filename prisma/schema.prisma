@@ -132,6 +132,7 @@ model User {
   updatedAt       DateTime         @updatedAt
 
   refreshTokens   RefreshToken[]
+  passwordResetTokens PasswordResetToken[]
   auditLogs       AuditLog[]
   confirmedRentScorePayments RentScorePayment[] @relation("RentScorePaymentConfirmedBy")
   rentScoreEvents RentScoreEvent[]
@@ -170,6 +171,7 @@ model PublicAccount {
 
   verificationTokens EmailVerificationToken[]
   refreshTokens      PublicRefreshToken[]
+  passwordResetTokens PasswordResetToken[]
   rentScoreEvents    RentScoreEvent[]
   linkedProperties   PropertyMember[]          @relation("PropertyMemberAccount")
   createdProperties  Property[]                @relation("PropertyCreator")
@@ -268,6 +270,23 @@ model EmailVerificationToken {
 
   publicAccount PublicAccount @relation(fields: [publicAccountId], references: [id], onDelete: Cascade)
 
+  @@index([publicAccountId])
+  @@index([expiresAt])
+}
+
+model PasswordResetToken {
+  id              String        @id @default(uuid())
+  userId          String?
+  publicAccountId String?
+  tokenHash       String        @unique
+  expiresAt       DateTime
+  consumedAt      DateTime?
+  createdAt       DateTime      @default(now())
+
+  user            User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  publicAccount   PublicAccount? @relation(fields: [publicAccountId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
   @@index([publicAccountId])
   @@index([expiresAt])
 }
