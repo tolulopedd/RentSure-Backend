@@ -200,6 +200,10 @@ async function getLinkedRentScoreReport(renterAccountId?: string | null) {
   }
 }
 
+function isScoreReportApproved(input?: { request?: { status: string } | null; payment?: { reportApprovedAt?: Date | string | null } | null }) {
+  return input?.request?.status === "REVIEWED" || Boolean(input?.payment?.reportApprovedAt);
+}
+
 function memberSummary(member: {
   role: PropertyMemberRole;
   account: PublicAccount;
@@ -830,70 +834,79 @@ export async function listWorkspaceQueue(publicAccountId: string) {
 
   return {
     items: await Promise.all(
-      items.map(async (item) => ({
-        id: item.id,
-        firstName: item.firstName,
-        lastName: item.lastName,
-        organizationName: item.organizationName,
-        email: item.email,
-        phone: item.phone,
-        address: item.address,
-        city: item.city,
-        state: item.state,
-        status: item.status,
-        property: {
-          id: item.property.id,
-          name: item.property.name,
-          summaryLabel: propertySummary(item.property),
-          address: item.property.address,
-          city: item.property.city,
-          state: item.property.state,
-          bedroomCount: item.property.bedroomCount,
-          bathroomCount: item.property.bathroomCount,
-          toiletCount: item.property.toiletCount,
-          members: item.property.members.map(memberSummary)
-        },
-        linkedRentScore: await mapLinkedRentScore(item.renterAccountId),
-        decision: item.decision
-          ? {
-              decision: item.decision,
-              decidedAt: item.decisionAt,
-              decidedByName: item.decisionBy ? publicAccountDisplayName(item.decisionBy) : null,
-              note: item.decisionNote
-            }
-          : null,
-        latestScoreRequest: item.scoreRequests[0]
-          ? {
-              id: item.scoreRequests[0].id,
-              status: item.scoreRequests[0].status,
-              notes: item.scoreRequests[0].notes,
-              createdAt: item.scoreRequests[0].createdAt,
-              requestedBy: publicAccountDisplayName(item.scoreRequests[0].requestedBy),
-              forwardedTo: item.scoreRequests[0].forwardedTo ? publicAccountDisplayName(item.scoreRequests[0].forwardedTo) : null
-            }
-          : null,
-        latestRentScorePayment: item.rentScorePayments[0]
-          ? {
-              id: item.rentScorePayments[0].id,
-              provider: item.rentScorePayments[0].provider,
-              status: item.rentScorePayments[0].status,
+      items.map(async (item) => {
+        const latestScoreRequest = item.scoreRequests[0] || null;
+        const canShareReviewedScore = isScoreReportApproved({
+          request: latestScoreRequest,
+          payment: item.rentScorePayments[0] || null
+        });
+        return {
+          id: item.id,
+          firstName: item.firstName,
+          lastName: item.lastName,
+          organizationName: item.organizationName,
+          email: item.email,
+          phone: item.phone,
+          address: item.address,
+          city: item.city,
+          state: item.state,
+          status: item.status,
+          property: {
+            id: item.property.id,
+            name: item.property.name,
+            summaryLabel: propertySummary(item.property),
+            address: item.property.address,
+            city: item.property.city,
+            state: item.property.state,
+            bedroomCount: item.property.bedroomCount,
+            bathroomCount: item.property.bathroomCount,
+            toiletCount: item.property.toiletCount,
+            members: item.property.members.map(memberSummary)
+          },
+          linkedRentScore: canShareReviewedScore ? await mapLinkedRentScore(item.renterAccountId) : null,
+          decision: item.decision
+            ? {
+                decision: item.decision,
+                decidedAt: item.decisionAt,
+                decidedByName: item.decisionBy ? publicAccountDisplayName(item.decisionBy) : null,
+                note: item.decisionNote
+              }
+            : null,
+          latestScoreRequest: latestScoreRequest
+            ? {
+                id: latestScoreRequest.id,
+                status: latestScoreRequest.status,
+                notes: latestScoreRequest.notes,
+                createdAt: latestScoreRequest.createdAt,
+                reviewedAt: latestScoreRequest.reviewedAt,
+                requestedBy: publicAccountDisplayName(latestScoreRequest.requestedBy),
+                forwardedTo: latestScoreRequest.forwardedTo ? publicAccountDisplayName(latestScoreRequest.forwardedTo) : null
+              }
+            : null,
+          latestRentScorePayment: item.rentScorePayments[0]
+            ? {
+                id: item.rentScorePayments[0].id,
+                provider: item.rentScorePayments[0].provider,
+                status: item.rentScorePayments[0].status,
               amountNgn: item.rentScorePayments[0].amountNgn,
               reference: item.rentScorePayments[0].reference,
+              reportApprovedAt: item.rentScorePayments[0].reportApprovedAt,
               createdAt: item.rentScorePayments[0].createdAt
             }
-          : null,
-        paymentSchedules: item.paymentSchedules.map((schedule: any) => ({
-          id: schedule.id,
-          paymentType: schedule.paymentType,
-          amountNgn: schedule.amountNgn,
-          dueDate: schedule.dueDate,
-          status: schedule.status,
-          confirmationInitiatedAt: schedule.confirmationInitiatedAt,
-          confirmedAt: schedule.confirmedAt,
-          confirmationTiming: schedule.confirmationTiming
-        })),
-        createdAt: item.createdAt
-      }))
+            : null,
+          paymentSchedules: item.paymentSchedules.map((schedule: any) => ({
+            id: schedule.id,
+            paymentType: schedule.paymentType,
+            amountNgn: schedule.amountNgn,
+            dueDate: schedule.dueDate,
+            status: schedule.status,
+            confirmationInitiatedAt: schedule.confirmationInitiatedAt,
+            confirmedAt: schedule.confirmedAt,
+            confirmationTiming: schedule.confirmationTiming
+          })),
+          createdAt: item.createdAt
+        };
+      })
     )
   };
 }
@@ -960,7 +973,7 @@ export async function searchWorkspaceRenters(input: {
 export async function getWorkspaceQueueItem(publicAccountId: string, proposedRenterId: string, tx: DbClient = prisma) {
   const item = await getAccessibleProposedRenter(publicAccountId, proposedRenterId, tx);
 
-  const [scoreRequests, paymentSchedules, latestRentScorePayment, linkedRentScore] = await Promise.all([
+  const [scoreRequests, paymentSchedules, latestRentScorePayment] = await Promise.all([
     tx.scoreRequest.findMany({
       where: { proposedRenterId },
       include: {
@@ -981,11 +994,18 @@ export async function getWorkspaceQueueItem(publicAccountId: string, proposedRen
     tx.rentScorePayment.findFirst({
       where: { proposedRenterId },
       orderBy: { createdAt: "desc" }
-    }),
-    mapLinkedRentScore(item.renterAccountId)
+    })
   ]);
 
-  const linkedRentScoreReport = await getLinkedRentScoreReport(item.renterAccountId);
+  const latestScoreRequest = scoreRequests[0] || null;
+  const canShareReviewedScore = isScoreReportApproved({
+    request: latestScoreRequest,
+    payment: latestRentScorePayment
+  });
+  const [linkedRentScore, linkedRentScoreReport] = await Promise.all([
+    canShareReviewedScore ? mapLinkedRentScore(item.renterAccountId) : Promise.resolve(null),
+    canShareReviewedScore ? getLinkedRentScoreReport(item.renterAccountId) : Promise.resolve(null)
+  ]);
   const activities = await tx.proposedRenterActivity.findMany({
     where: { proposedRenterId },
     include: {
@@ -1066,6 +1086,7 @@ export async function getWorkspaceQueueItem(publicAccountId: string, proposedRen
           checkoutUrl: latestRentScorePayment.checkoutUrl,
           manualTransferReference: latestRentScorePayment.manualTransferReference,
           notes: latestRentScorePayment.notes,
+          reportApprovedAt: latestRentScorePayment.reportApprovedAt,
           createdAt: latestRentScorePayment.createdAt,
           manualTransfer:
             latestRentScorePayment.provider === "MANUAL_TRANSFER" && latestRentScorePayment.metadata && typeof latestRentScorePayment.metadata === "object"
@@ -1129,6 +1150,165 @@ export async function getWorkspaceQueueItem(publicAccountId: string, proposedRen
     })),
     createdAt: item.createdAt,
     updatedAt: item.updatedAt
+  };
+}
+
+export async function listAdminRenterActivities() {
+  const items = await prisma.proposedRenterActivity.findMany({
+    where: {
+      actor: {
+        accountType: "RENTER"
+      }
+    },
+    include: {
+      actor: true,
+      proposedRenter: {
+        include: {
+          property: true,
+          renterAccount: true
+        }
+      }
+    },
+    orderBy: { createdAt: "desc" },
+    take: 200
+  });
+
+  return {
+    items: items.map((item) => ({
+      id: item.id,
+      activityType: item.activityType,
+      message: item.message,
+      createdAt: item.createdAt,
+      actor: item.actor
+        ? {
+            id: item.actor.id,
+            name: publicAccountDisplayName(item.actor),
+            email: item.actor.email
+          }
+        : null,
+      renter: {
+        proposedRenterId: item.proposedRenter.id,
+        accountId: item.proposedRenter.renterAccountId,
+        name: item.proposedRenter.organizationName || `${item.proposedRenter.firstName} ${item.proposedRenter.lastName}`.trim(),
+        email: item.proposedRenter.email,
+        status: item.proposedRenter.status,
+        decision: item.proposedRenter.decision
+      },
+      property: {
+        id: item.proposedRenter.property.id,
+        summaryLabel: propertySummary(item.proposedRenter.property),
+        address: item.proposedRenter.property.address,
+        city: item.proposedRenter.property.city,
+        state: item.proposedRenter.property.state
+      }
+    }))
+  };
+}
+
+export async function listAdminLandlordAgentActivities() {
+  const items = await prisma.proposedRenterActivity.findMany({
+    where: {
+      actor: {
+        accountType: {
+          in: ["LANDLORD", "AGENT"]
+        }
+      }
+    },
+    include: {
+      actor: true,
+      proposedRenter: {
+        include: {
+          property: true,
+          rentScorePayments: {
+            orderBy: { createdAt: "desc" },
+            take: 1
+          },
+          scoreRequests: {
+            include: {
+              requestedBy: true,
+              forwardedTo: true
+            },
+            orderBy: { createdAt: "desc" },
+            take: 1
+          }
+        }
+      }
+    },
+    orderBy: { createdAt: "desc" },
+    take: 200
+  });
+
+  return {
+    items: await Promise.all(
+      items.map(async (item) => {
+        const latestScoreRequest = item.proposedRenter.scoreRequests[0] || null;
+        const latestPayment = item.proposedRenter.rentScorePayments[0] || null;
+        const canApproveShare = Boolean(
+          item.proposedRenter.renterAccountId &&
+            latestScoreRequest &&
+            latestPayment &&
+            latestPayment.status === "SUCCEEDED" &&
+            !latestPayment.reportApprovedAt
+        );
+        return {
+          id: item.id,
+          activityType: item.activityType,
+          message: item.message,
+          createdAt: item.createdAt,
+          actor: item.actor
+            ? {
+                id: item.actor.id,
+                accountType: item.actor.accountType,
+                name: publicAccountDisplayName(item.actor),
+                email: item.actor.email
+              }
+            : null,
+          renter: {
+            proposedRenterId: item.proposedRenter.id,
+            accountId: item.proposedRenter.renterAccountId,
+            name: item.proposedRenter.organizationName || `${item.proposedRenter.firstName} ${item.proposedRenter.lastName}`.trim(),
+            email: item.proposedRenter.email,
+            status: item.proposedRenter.status,
+            decision: item.proposedRenter.decision
+          },
+          property: {
+            id: item.proposedRenter.property.id,
+            summaryLabel: propertySummary(item.proposedRenter.property),
+            address: item.proposedRenter.property.address,
+            city: item.proposedRenter.property.city,
+            state: item.proposedRenter.property.state
+          },
+          latestScoreRequest: latestScoreRequest
+            ? {
+                id: latestScoreRequest.id,
+                status: latestScoreRequest.status,
+                createdAt: latestScoreRequest.createdAt,
+                reviewedAt: latestScoreRequest.reviewedAt,
+                requestedBy: publicAccountDisplayName(latestScoreRequest.requestedBy),
+                forwardedTo: latestScoreRequest.forwardedTo ? publicAccountDisplayName(latestScoreRequest.forwardedTo) : null
+              }
+            : null,
+          latestRentScorePayment: latestPayment
+            ? {
+                id: latestPayment.id,
+                provider: latestPayment.provider,
+                status: latestPayment.status,
+                amountNgn: latestPayment.amountNgn,
+                reference: latestPayment.reference,
+                reportApprovedAt: latestPayment.reportApprovedAt
+              }
+            : null,
+          shareApproval: {
+            status: isScoreReportApproved({ request: latestScoreRequest, payment: latestPayment })
+              ? "APPROVED"
+              : latestScoreRequest
+                ? "PENDING"
+                : "NOT_REQUESTED",
+            canApprove: canApproveShare
+          }
+        };
+      })
+    )
   };
 }
 

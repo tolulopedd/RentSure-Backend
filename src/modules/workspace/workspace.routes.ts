@@ -125,6 +125,7 @@ const updatePaymentScheduleSchema = z.object({
   status: paymentStatusSchema,
   paidAt: z.coerce.date().nullable().optional()
 });
+const nigeriaPhoneSchema = z.string().trim().regex(/^(?:0\d{10}|\+234\d{10})$/, "Use 09052222022 or +2349052222022.");
 
 const confirmWorkspacePaymentSchema = z.object({
   paidAt: z.coerce.date().nullable().optional(),
@@ -147,7 +148,7 @@ const updateProfileSchema = z.object({
   lastName: z.string().trim().min(1).optional(),
   organizationName: z.string().trim().optional().nullable(),
   registrationNumber: z.string().trim().max(120).optional().nullable(),
-  phone: z.string().trim().min(3).optional(),
+  phone: nigeriaPhoneSchema.optional(),
   state: z.string().trim().min(2).optional(),
   city: z.string().trim().min(2).optional(),
   address: z.string().trim().min(5).optional(),

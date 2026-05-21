@@ -5,8 +5,18 @@ import { AppError } from "../../common/errors/AppError";
 import { writeAuditLog } from "../../common/audit/audit";
 import { requireAuth } from "../../middleware/auth.middleware";
 import { requireRole } from "../../middleware/role.middleware";
-import { listPendingRenterInvites, resendPendingRenterInvite } from "../workspace/workspace.service";
-import { confirmManualRentScorePayment, listManualRentScorePayments } from "../score-payments/score-payments.service";
+import {
+  listAdminLandlordAgentActivities,
+  listAdminRenterActivities,
+  listPendingRenterInvites,
+  resendPendingRenterInvite
+} from "../workspace/workspace.service";
+import {
+  approveRentScoreReport,
+  confirmManualRentScorePayment,
+  listManualRentScorePayments,
+  listPendingRentScoreReportApprovals
+} from "../score-payments/score-payments.service";
 import {
   createRentScoreRule,
   deleteRentScoreEvent,
@@ -139,6 +149,74 @@ router.get(
   async (_req, res, next) => {
     try {
       const result = await listPendingRenterInvites();
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+router.post(
+  "/admin/rent-score/payments/:paymentId/approve-report",
+  requireAuth,
+  requireRole("ADMIN"),
+  async (req, res, next) => {
+    try {
+      const params = z.object({ paymentId: z.string().uuid() }).parse(req.params);
+      const result = await approveRentScoreReport({
+        adminUserId: req.user!.userId,
+        paymentId: params.paymentId
+      });
+
+      await writeAuditLog({
+        req,
+        action: "rent_score.report.approve",
+        entity: "RentScorePayment",
+        entityId: params.paymentId
+      });
+
+      res.json(result);
+    } catch (error) {
+      next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid approval request", 400, "VALIDATION_ERROR") : error);
+    }
+  }
+);
+
+router.get(
+  "/admin/rent-score/report-approvals",
+  requireAuth,
+  requireRole("ADMIN"),
+  async (_req, res, next) => {
+    try {
+      const result = await listPendingRentScoreReportApprovals();
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+router.get(
+  "/admin/renter-activities",
+  requireAuth,
+  requireRole("ADMIN"),
+  async (_req, res, next) => {
+    try {
+      const result = await listAdminRenterActivities();
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+router.get(
+  "/admin/landlord-agent-activities",
+  requireAuth,
+  requireRole("ADMIN"),
+  async (_req, res, next) => {
+    try {
+      const result = await listAdminLandlordAgentActivities();
       res.json(result);
     } catch (error) {
       next(error);

@@ -17,6 +17,7 @@ import {
 import { createRenterRentScorePaymentSession, verifyRenterRentScorePayment } from "../score-payments/score-payments.service";
 
 const router = Router();
+const nigeriaPhoneSchema = z.string().trim().regex(/^(?:0\d{10}|\+234\d{10})$/, "Use 09052222022 or +2349052222022.");
 
 router.use("/renter", requireAuth, requirePublicRole("RENTER"));
 
@@ -25,7 +26,7 @@ const updateProfileSchema = z.object({
   lastName: z.string().trim().min(1).optional(),
   organizationName: z.string().trim().optional().nullable(),
   registrationNumber: z.string().trim().max(120).optional().nullable(),
-  phone: z.string().trim().min(3).optional(),
+  phone: nigeriaPhoneSchema.optional(),
   state: z.string().trim().min(2).optional(),
   city: z.string().trim().min(2).optional(),
   address: z.string().trim().min(5).optional(),
@@ -70,7 +71,7 @@ const shareReportSchema = z.object({
   recipientType: z.enum(["LANDLORD", "AGENT"]),
   recipientFirstName: z.string().trim().min(1).optional(),
   recipientLastName: z.string().trim().min(1).optional(),
-  recipientPhone: z.string().trim().min(3).optional(),
+  recipientPhone: nigeriaPhoneSchema.optional(),
   note: z.string().trim().max(500).optional()
 });
 

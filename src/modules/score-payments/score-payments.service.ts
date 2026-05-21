@@ -7,6 +7,15 @@ import { getWorkspaceQueueItem } from "../workspace/workspace.service";
 
 type DbClient = Prisma.TransactionClient | typeof prisma;
 
+function publicAccountDisplayName(account: {
+  firstName?: string | null;
+  lastName?: string | null;
+  organizationName?: string | null;
+}) {
+  if (account.organizationName?.trim()) return account.organizationName.trim();
+  return [account.firstName, account.lastName].filter(Boolean).join(" ") || "Unnamed account";
+}
+
 function normalizePath(path?: string) {
   if (!path?.trim()) return "/account/decisions";
   const value = path.trim();
@@ -785,6 +794,128 @@ export async function confirmManualRentScorePayment(input: {
         proposedRenterId: payment.proposedRenterId,
         requestedByAccountId: payment.requestedByAccountId,
         notes: payment.notes
+      });
+    }
+  });
+
+  return { success: true };
+}
+
+export async function listPendingRentScoreReportApprovals() {
+  const items = await prisma.rentScorePayment.findMany({
+    where: {
+      status: "SUCCEEDED",
+      reportApprovedAt: null
+    },
+    include: {
+      proposedRenter: {
+        include: {
+          property: true
+        }
+      },
+      requestedBy: true,
+      scoreRequest: true
+    },
+    orderBy: { createdAt: "desc" }
+  });
+
+  return {
+    items: items.map((item) => ({
+      id: item.id,
+      reference: item.reference,
+      amountNgn: item.amountNgn,
+      currency: item.currency,
+      provider: item.provider,
+      createdAt: item.createdAt,
+      paidAt: item.paidAt,
+      verifiedAt: item.verifiedAt,
+      notes: item.notes,
+      reportType: item.proposedRenterId ? "LANDLORD_REQUEST" : "RENTER_SELF_SERVICE",
+      requestedBy: {
+        id: item.requestedBy.id,
+        name: publicAccountDisplayName(item.requestedBy),
+        email: item.requestedBy.email,
+        accountType: item.requestedBy.accountType
+      },
+      renter: {
+        id: item.proposedRenter?.id || item.requestedBy.id,
+        name: item.proposedRenter ? publicAccountDisplayName(item.proposedRenter) : publicAccountDisplayName(item.requestedBy),
+        email: item.proposedRenter?.email || item.requestedBy.email
+      },
+      property: item.proposedRenter?.property
+        ? {
+            id: item.proposedRenter.property.id,
+            name: item.proposedRenter.property.name,
+            address: item.proposedRenter.property.address,
+            city: item.proposedRenter.property.city,
+            state: item.proposedRenter.property.state
+          }
+        : null,
+      scoreRequestId: item.scoreRequestId
+    }))
+  };
+}
+
+export async function approveRentScoreReport(input: {
+  adminUserId: string;
+  paymentId: string;
+}) {
+  const payment = await prisma.rentScorePayment.findUnique({
+    where: { id: input.paymentId },
+    include: {
+      scoreRequest: true
+    }
+  });
+
+  if (!payment) {
+    throw new AppError("Rent score payment not found", 404, "RENT_SCORE_PAYMENT_NOT_FOUND");
+  }
+
+  if (payment.status !== "SUCCEEDED") {
+    throw new AppError("This payment is not ready for report approval", 400, "VALIDATION_ERROR");
+  }
+
+  if (payment.reportApprovedAt) {
+    return { success: true };
+  }
+
+  await prisma.$transaction(async (tx) => {
+    await tx.rentScorePayment.update({
+      where: { id: payment.id },
+      data: {
+        reportApprovedAt: new Date(),
+        reportApprovedByUserId: input.adminUserId
+      }
+    });
+
+    if (payment.proposedRenterId && payment.scoreRequestId) {
+      await tx.scoreRequest.update({
+        where: { id: payment.scoreRequestId },
+        data: {
+          status: "REVIEWED",
+          reviewedAt: new Date()
+        }
+      });
+
+      await tx.proposedRenter.update({
+        where: { id: payment.proposedRenterId },
+        data: {
+          status: "DECISION_READY"
+        }
+      });
+
+      await tx.proposedRenterActivity.create({
+        data: {
+          proposedRenterId: payment.proposedRenterId,
+          actorAccountId: null,
+          activityType: "SCORE_FORWARDED",
+          message: "Admin approved this rent score report for landlord review.",
+          metadata: {
+            paymentId: payment.id,
+            scoreRequestId: payment.scoreRequestId,
+            adminUserId: input.adminUserId
+          } as Prisma.JsonObject
+        }
       });
     }
   });

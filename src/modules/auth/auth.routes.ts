@@ -24,7 +24,7 @@ const publicAccountTypeSchema = z.enum(["RENTER", "LANDLORD", "AGENT"]);
 const publicEntityTypeSchema = z.enum(["INDIVIDUAL", "COMPANY"]);
 const strongPasswordSchema = z
   .string()
-  .min(10)
+  .min(8)
   .regex(/[A-Z]/, "Password must include at least one uppercase letter")
   .regex(/[a-z]/, "Password must include at least one lowercase letter")
   .regex(/\d/, "Password must include at least one number")

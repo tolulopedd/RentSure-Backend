@@ -14,6 +14,29 @@ function publicAccountDisplayName(account: { firstName: string; lastName: string
   return [account.firstName, account.lastName].filter(Boolean).join(" ");
 }
 
+async function hasApprovedRenterReportAccess(publicAccountId: string) {
+  const [linkedRequestCount, selfServiceApprovalCount] = await Promise.all([
+    prisma.scoreRequest.count({
+      where: {
+        status: "REVIEWED",
+        proposedRenter: {
+          renterAccountId: publicAccountId
+        }
+      }
+    }),
+    prisma.rentScorePayment.count({
+      where: {
+        requestedByAccountId: publicAccountId,
+        proposedRenterId: null,
+        status: "SUCCEEDED",
+        reportApprovedAt: { not: null }
+      }
+    })
+  ]);
+
+  return linkedRequestCount > 0 || selfServiceApprovalCount > 0;
+}
+
 function isMissingRenterScoreShareTable(error: unknown) {
   return (
     typeof error === "object" &&
@@ -229,7 +252,7 @@ export async function getRenterDashboard(publicAccountId: string) {
     take: 12
   });
 
-  const [account, rentScore, linkedCases, shareHistory, notifications, rentScorePurchases] = await Promise.all([
+  const [account, rentScore, linkedCases, shareHistory, notifications, rentScorePurchases, canShareOrDownload] = await Promise.all([
     getRenterAccount(publicAccountId),
     buildRentScoreSnapshot(publicAccountId),
     prisma.proposedRenter.findMany({
@@ -261,7 +284,8 @@ export async function getRenterDashboard(publicAccountId: string) {
     }),
     shareHistoryPromise,
     notificationsPromise,
-    rentScorePurchasesPromise
+    rentScorePurchasesPromise,
+    hasApprovedRenterReportAccess(publicAccountId)
   ]);
 
   const profileCompleteness = [
@@ -286,9 +310,9 @@ export async function getRenterDashboard(publicAccountId: string) {
       city: account.city,
       address: account.address,
       notes: account.notes,
-      nin: account.nin,
+      nin: null,
       ninVerifiedAt: account.ninVerifiedAt,
-      bvn: account.bvn,
+      bvn: null,
       bvnVerifiedAt: account.bvnVerifiedAt,
       passportPhoto: toPublicDocumentAsset(account.passportPhotoDocument),
       createdAt: account.createdAt
@@ -299,6 +323,9 @@ export async function getRenterDashboard(publicAccountId: string) {
       pendingSchedules: linkedCases.flatMap((item) => item.paymentSchedules).filter((schedule) => schedule.status !== "PAID").length,
       profileCompletenessPercent: Math.round((profileCompleteness / 5) * 100),
       unreadNotifications: notifications.filter((item) => !item.readAt).length
+    },
+    reportAccess: {
+      canShareOrDownload
     },
     notifications: notifications.map((notification) => ({
       id: notification.id,
@@ -335,6 +362,7 @@ export async function getRenterDashboard(publicAccountId: string) {
       createdAt: payment.createdAt,
       paidAt: payment.paidAt,
       verifiedAt: payment.verifiedAt,
+      reportApprovedAt: payment.reportApprovedAt,
       manualTransfer:
         payment.provider === "MANUAL_TRANSFER" && payment.metadata && typeof payment.metadata === "object"
           ? (payment.metadata as {
@@ -671,7 +699,12 @@ export async function shareRenterScoreReport(input: {
   note?: string;
 }) {
   const account = await getRenterAccount(input.publicAccountId);
+  const canShareOrDownload = await hasApprovedRenterReportAccess(account.id);
   const recipientEmail = normalizeEmail(input.recipientEmail);
+
+  if (!canShareOrDownload) {
+    throw new AppError("Your rent score report will be available after admin approval.", 403, "FORBIDDEN");
+  }
 
   if (recipientEmail === normalizeEmail(account.email)) {
     throw new AppError("Use a landlord or agent email to share this report", 400, "VALIDATION_ERROR");

@@ -135,6 +135,7 @@ model User {
   passwordResetTokens PasswordResetToken[]
   auditLogs       AuditLog[]
   confirmedRentScorePayments RentScorePayment[] @relation("RentScorePaymentConfirmedBy")
+  reportApprovedRentScorePayments RentScorePayment[] @relation("RentScorePaymentReportApprovedBy")
   rentScoreEvents RentScoreEvent[]
 
   @@index([role])
@@ -523,6 +524,7 @@ model RentScorePayment {
   proposedRenterId     String?
   requestedByAccountId String
   confirmedByUserId    String?
+  reportApprovedByUserId String?
   scoreRequestId       String?                  @unique
   provider             RentScorePaymentProvider
   status               RentScorePaymentStatus   @default(PENDING)
@@ -538,17 +540,20 @@ model RentScorePayment {
   paidAt               DateTime?
   verifiedAt           DateTime?
   confirmedAt          DateTime?
+  reportApprovedAt     DateTime?
   createdAt            DateTime                 @default(now())
   updatedAt            DateTime                 @updatedAt
 
   proposedRenter       ProposedRenter?          @relation(fields: [proposedRenterId], references: [id], onDelete: Cascade)
   requestedBy          PublicAccount            @relation("RentScorePaymentRequestedBy", fields: [requestedByAccountId], references: [id], onDelete: Cascade)
   confirmedBy          User?                    @relation("RentScorePaymentConfirmedBy", fields: [confirmedByUserId], references: [id], onDelete: SetNull)
+  reportApprovedBy     User?                    @relation("RentScorePaymentReportApprovedBy", fields: [reportApprovedByUserId], references: [id], onDelete: SetNull)
   scoreRequest         ScoreRequest?            @relation(fields: [scoreRequestId], references: [id], onDelete: SetNull)
 
   @@index([proposedRenterId, createdAt])
   @@index([requestedByAccountId, createdAt])
   @@index([status, createdAt])
+  @@index([reportApprovedAt, createdAt])
 }
 
 model PaymentSchedule {
