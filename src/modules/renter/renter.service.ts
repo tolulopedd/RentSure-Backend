@@ -4,6 +4,8 @@ import { AppError } from "../../common/errors/AppError";
 import { buildRentScoreSnapshot, ensureSingleRentScoreEvent } from "../rent-score/rent-score.service";
 import { attachPassportPhotoToPublicAccount, buildPublicDocumentViewUrl, toPublicDocumentAsset } from "../storage/storage.service";
 import { createMailPreview } from "../mail-preview/mail-preview.service";
+import { renderInfoPanel, renderTransactionalEmail } from "../mail/mail-templates";
+import { getAvailableRentScorePaymentProviders } from "../score-payments/score-payments.service";
 
 function normalizeEmail(email: string) {
   return email.trim().toLowerCase();
@@ -12,29 +14,6 @@ function normalizeEmail(email: string) {
 function publicAccountDisplayName(account: { firstName: string; lastName: string; organizationName?: string | null }) {
   if (account.organizationName?.trim()) return account.organizationName.trim();
   return [account.firstName, account.lastName].filter(Boolean).join(" ");
-}
-
-async function hasApprovedRenterReportAccess(publicAccountId: string) {
-  const [linkedRequestCount, selfServiceApprovalCount] = await Promise.all([
-    prisma.scoreRequest.count({
-      where: {
-        status: "REVIEWED",
-        proposedRenter: {
-          renterAccountId: publicAccountId
-        }
-      }
-    }),
-    prisma.rentScorePayment.count({
-      where: {
-        requestedByAccountId: publicAccountId,
-        proposedRenterId: null,
-        status: "SUCCEEDED",
-        reportApprovedAt: { not: null }
-      }
-    })
-  ]);
-
-  return linkedRequestCount > 0 || selfServiceApprovalCount > 0;
 }
 
 function isMissingRenterScoreShareTable(error: unknown) {
@@ -252,7 +231,7 @@ export async function getRenterDashboard(publicAccountId: string) {
     take: 12
   });
 
-  const [account, rentScore, linkedCases, shareHistory, notifications, rentScorePurchases, canShareOrDownload] = await Promise.all([
+  const [account, rentScore, linkedCases, shareHistory, notifications, rentScorePurchases] = await Promise.all([
     getRenterAccount(publicAccountId),
     buildRentScoreSnapshot(publicAccountId),
     prisma.proposedRenter.findMany({
@@ -284,8 +263,7 @@ export async function getRenterDashboard(publicAccountId: string) {
     }),
     shareHistoryPromise,
     notificationsPromise,
-    rentScorePurchasesPromise,
-    hasApprovedRenterReportAccess(publicAccountId)
+    rentScorePurchasesPromise
   ]);
 
   const profileCompleteness = [
@@ -325,8 +303,9 @@ export async function getRenterDashboard(publicAccountId: string) {
       unreadNotifications: notifications.filter((item) => !item.readAt).length
     },
     reportAccess: {
-      canShareOrDownload
+      canShareOrDownload: true
     },
+    availableRentScorePaymentProviders: getAvailableRentScorePaymentProviders(),
     notifications: notifications.map((notification) => ({
       id: notification.id,
       notificationType: notification.notificationType,
@@ -699,12 +678,7 @@ export async function shareRenterScoreReport(input: {
   note?: string;
 }) {
   const account = await getRenterAccount(input.publicAccountId);
-  const canShareOrDownload = await hasApprovedRenterReportAccess(account.id);
   const recipientEmail = normalizeEmail(input.recipientEmail);
-
-  if (!canShareOrDownload) {
-    throw new AppError("Your rent score report will be available after admin approval.", 403, "FORBIDDEN");
-  }
 
   if (recipientEmail === normalizeEmail(account.email)) {
     throw new AppError("Use a landlord or agent email to share this report", 400, "VALIDATION_ERROR");
@@ -800,23 +774,22 @@ export async function shareRenterScoreReport(input: {
           })
         }
       } as never);
+      const scorePanel = renderInfoPanel({
+        label: "Rent score",
+        value: `${rentScore.summary.score} / ${rentScore.summary.maxScore}`,
+        note: `Band: ${rentScore.summary.scoreBand}`
+      });
       const legacySharePreview = createMailPreview({
         category: "RENTER_SHARE_REPORT",
         to: recipientEmail,
         subject: "RentSure rent score report shared with you",
-        html: `
-          <div style="font-family: Arial, sans-serif; color: #0f172a;">
-            <p style="font-size: 14px; color: #475569;">Hello,</p>
-            <p style="font-size: 14px; line-height: 1.7; color: #334155;">
-              ${publicAccountDisplayName(account)} has shared a RentSure rent score report with you.
-            </p>
-            <div style="border: 1px solid #dbe4f3; border-radius: 16px; padding: 16px; background: #f8fbff; margin: 20px 0;">
-              <p style="margin: 0; font-size: 12px; letter-spacing: 0.16em; text-transform: uppercase; color: #1d4ed8;">Rent score</p>
-              <p style="margin: 8px 0 0; font-size: 28px; font-weight: 700;">${rentScore.summary.score} / ${rentScore.summary.maxScore}</p>
-              <p style="margin: 8px 0 0; color: #475569;">Band: ${rentScore.summary.scoreBand}</p>
-            </div>
-          </div>
-        `
+        html: renderTransactionalEmail({
+          eyebrow: "Rent Score Shared",
+          title: "Rent score report shared with you",
+          greeting: "Hello,",
+          paragraphs: [`${publicAccountDisplayName(account)} has shared a RentSure rent score report with you.`],
+          sectionHtml: scorePanel
+        })
       });
       return {
         dashboard: await getRenterDashboard(account.id),
@@ -826,31 +799,26 @@ export async function shareRenterScoreReport(input: {
     throw error;
   }
 
+  const scorePanel = renderInfoPanel({
+    label: "Rent score",
+    value: `${rentScore.summary.score} / ${rentScore.summary.maxScore}`,
+    note: `Band: ${rentScore.summary.scoreBand}`
+  });
   const sharePreview = createMailPreview({
     category: "RENTER_SHARE_REPORT",
     to: recipientEmail,
     subject: "RentSure rent score report shared with you",
-    html: `
-      <div style="font-family: Arial, sans-serif; color: #0f172a;">
-        <p style="font-size: 14px; color: #475569;">Hello,</p>
-        <p style="font-size: 14px; line-height: 1.7; color: #334155;">
-          ${publicAccountDisplayName(account)} has shared a RentSure rent score report with you.
-        </p>
-        <div style="border: 1px solid #dbe4f3; border-radius: 16px; padding: 16px; background: #f8fbff; margin: 20px 0;">
-          <p style="margin: 0; font-size: 12px; letter-spacing: 0.16em; text-transform: uppercase; color: #1d4ed8;">Rent score</p>
-          <p style="margin: 8px 0 0; font-size: 28px; font-weight: 700;">${rentScore.summary.score} / ${rentScore.summary.maxScore}</p>
-          <p style="margin: 8px 0 0; color: #475569;">Band: ${rentScore.summary.scoreBand}</p>
-        </div>
-        ${
-          input.note?.trim()
-            ? `<p style="font-size: 14px; line-height: 1.7; color: #334155;"><strong>Note:</strong> ${input.note.trim()}</p>`
-            : ""
-        }
-        <p style="font-size: 14px; line-height: 1.7; color: #334155;">
-          This preview shows the outbound share email in development while live email delivery is still being connected.
-        </p>
-      </div>
-    `
+    html: renderTransactionalEmail({
+      eyebrow: "Rent Score Shared",
+      title: "Rent score report shared with you",
+      greeting: "Hello,",
+      paragraphs: [
+        `${publicAccountDisplayName(account)} has shared a RentSure rent score report with you.`,
+        ...(input.note?.trim() ? [`<strong>Note:</strong> ${input.note.trim()}`] : []),
+        "This preview shows the outbound share email in development while live email delivery is still being connected."
+      ],
+      sectionHtml: scorePanel
+    })
   });
 
   return {

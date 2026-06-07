@@ -12,7 +12,9 @@ import { logger } from "../../common/logger/logger";
 import { env } from "../../config/env";
 import { buildRentScoreSnapshot, recordRentScoreEvent } from "../rent-score/rent-score.service";
 import { attachPassportPhotoToPublicAccount, buildPublicDocumentViewUrl, toPublicDocumentAsset } from "../storage/storage.service";
+import { renderTransactionalEmail } from "../mail/mail-templates";
 import { sendTransactionalMail } from "../mail/mail.service";
+import { getAvailableRentScorePaymentProviders } from "../score-payments/score-payments.service";
 
 type DbClient = Prisma.TransactionClient | typeof prisma;
 type ProposedRenterDecision = "APPROVED" | "HOLD" | "DECLINED";
@@ -44,6 +46,20 @@ function propertySummary(property: {
   }
   const bedroomLabel = `${property.bedroomCount || 1} Bedroom`;
   return `${bedroomLabel} ${typeLabel} at ${property.name}`;
+}
+
+function propertyUnitSummary(unit?: {
+  label?: string | null;
+  bedroomCount?: number | null;
+  bathroomCount?: number | null;
+} | null) {
+  if (!unit) return null;
+  const parts = [
+    unit.label?.trim() || null,
+    unit.bedroomCount ? `${unit.bedroomCount} bed` : null,
+    unit.bathroomCount ? `${unit.bathroomCount} bath` : null
+  ].filter(Boolean);
+  return parts.join(" · ");
 }
 
 function addDateByFrequency(date: Date, frequency: "MONTHLY" | "QUARTERLY" | "YEARLY", step = 1) {
@@ -107,6 +123,61 @@ function toWorkspaceProfilePayload(account: PublicAccount & { passportPhotoDocum
   };
 }
 
+async function listLinkedWorkspaceAccounts(publicAccountId: string, tx: DbClient = prisma) {
+  const memberships = await tx.propertyMember.findMany({
+    where: { publicAccountId },
+    include: {
+      property: {
+        include: {
+          members: {
+            include: {
+              account: true
+            }
+          }
+        }
+      }
+    }
+  });
+
+  const linkedById = new Map<string, {
+    accountId: string;
+    accountType: "LANDLORD" | "AGENT";
+    name: string;
+    email: string;
+    phone: string;
+    propertyCount: number;
+    properties: string[];
+  }>();
+
+  for (const membership of memberships) {
+    for (const member of membership.property.members) {
+      if (member.publicAccountId === publicAccountId) continue;
+      if (member.account.accountType !== "LANDLORD" && member.account.accountType !== "AGENT") continue;
+
+      const existing = linkedById.get(member.account.id);
+      if (existing) {
+        if (!existing.properties.includes(membership.property.name)) {
+          existing.properties.push(membership.property.name);
+          existing.propertyCount += 1;
+        }
+        continue;
+      }
+
+      linkedById.set(member.account.id, {
+        accountId: member.account.id,
+        accountType: member.account.accountType,
+        name: publicAccountDisplayName(member.account),
+        email: member.account.email,
+        phone: member.account.phone,
+        propertyCount: 1,
+        properties: [membership.property.name]
+      });
+    }
+  }
+
+  return Array.from(linkedById.values()).sort((left, right) => left.name.localeCompare(right.name));
+}
+
 async function getPropertyMembership(publicAccountId: string, propertyId: string, tx: DbClient = prisma) {
   await getWorkspaceAccount(publicAccountId, tx);
 
@@ -122,6 +193,9 @@ async function getPropertyMembership(publicAccountId: string, propertyId: string
             include: {
               account: true
             }
+          },
+          units: {
+            orderBy: { createdAt: "asc" }
           }
         }
       }
@@ -151,6 +225,7 @@ async function getAccessibleProposedRenter(publicAccountId: string, proposedRent
     },
     include: {
       decisionBy: true,
+      propertyUnit: true,
       property: {
         include: {
           members: {
@@ -198,10 +273,6 @@ async function getLinkedRentScoreReport(renterAccountId?: string | null) {
   } catch {
     return null;
   }
-}
-
-function isScoreReportApproved(input?: { request?: { status: string } | null; payment?: { reportApprovedAt?: Date | string | null } | null }) {
-  return input?.request?.status === "REVIEWED" || Boolean(input?.payment?.reportApprovedAt);
 }
 
 function memberSummary(member: {
@@ -277,7 +348,9 @@ async function createPublicAccountNotification(input: {
 async function notifyProposedRenter(input: {
   requestedByAccountId: string;
   requestedByName: string;
+  requestedByAccountType?: "LANDLORD" | "AGENT" | "ADMIN" | null;
   propertySummaryLabel: string;
+  propertyAddress: string;
   renterEmail: string;
   renterName: string;
   existingAccountId?: string | null;
@@ -286,46 +359,50 @@ async function notifyProposedRenter(input: {
   const isExistingMember = Boolean(input.existingAccountId);
   const actionPath = isExistingMember ? "/account/renter/queue" : `/signup?track=RENTER&email=${encodeURIComponent(input.renterEmail)}`;
   const actionUrl = `${env.APP_WEB_BASE_URL.replace(/\/+$/, "")}${actionPath}`;
+  const linkedByAgent = input.requestedByAccountType === "AGENT";
+  const greetingName = input.renterName || "there";
+  const existingMemberSubject = "You've Been Linked to a Property!";
+  const inviteSubject = "Reminder: Complete Your Account Setup!";
+  const existingMemberIntro = linkedByAgent
+    ? `You have been successfully linked to a property at <strong>${input.propertyAddress}</strong> by <strong>${input.requestedByName}</strong>, the agent representing the landlord.`
+    : `You have been successfully linked to a property at <strong>${input.propertyAddress}</strong> by the landlord.`;
+  const existingMemberFollowUp = linkedByAgent
+    ? "Please note that you will be informed if the landlord makes any decisions about your application."
+    : "Should the landlord make any decisions regarding your application, you will be notified promptly.";
+  const signInCopy = "Sign in to your RentSure account to review the linked property and landlord details.";
   const delivery = await sendTransactionalMail({
     category: isExistingMember ? "RENTER_NOTIFICATION" : "RENTER_INVITE",
     to: input.renterEmail,
-    subject: isExistingMember ? "A landlord linked a property to your RentSure account" : "A landlord is waiting for your RentSure signup",
-    html: `
-      <div style="font-family: Arial, sans-serif; color: #0f172a;">
-        <p style="font-size: 14px; color: #475569;">Hello ${input.renterName || "there"},</p>
-        <p style="font-size: 14px; line-height: 1.7; color: #334155;">
-          ${
-            isExistingMember
-              ? `<strong>${input.requestedByName}</strong> linked you to <strong>${input.propertySummaryLabel}</strong> on RentSure.`
-              : `<strong>${input.requestedByName}</strong> linked you to <strong>${input.propertySummaryLabel}</strong> and is waiting for your renter setup on RentSure.`
-          }
-        </p>
-        <p style="font-size: 14px; line-height: 1.7; color: #334155;">
-          ${
-            isExistingMember
-              ? "Open your renter workspace to review the linked property, rent score progress, and payment schedules."
-              : "Join RentSure and complete your renter profile so the landlord decision can continue without delay."
-          }
-        </p>
-        <p style="margin: 28px 0;">
-          <a href="${actionUrl}" style="display: inline-block; border-radius: 12px; background: #1d4ed8; color: white; padding: 12px 18px; text-decoration: none; font-weight: 600;">
-            ${isExistingMember ? "Open renter workspace" : "Join RentSure"}
-          </a>
-        </p>
-      </div>
-    `
+    subject: isExistingMember ? existingMemberSubject : inviteSubject,
+    html: renderTransactionalEmail({
+      eyebrow: isExistingMember ? "Property Linked" : "Account Setup",
+      title: isExistingMember ? "You've been linked to a property" : "Complete your account setup",
+      greeting: `Dear ${greetingName},`,
+      paragraphs: isExistingMember
+        ? [existingMemberIntro, existingMemberFollowUp, signInCopy]
+        : [
+            `We noticed that you were recently linked to a property at <strong>${input.propertyAddress}</strong>, but it looks like you haven’t created your account yet.`,
+            "Completing your account setup will allow you to stay updated on your application status and receive important notifications from the landlord or agent.",
+            "Sign up to get started and let us know if you need assistance or have any questions, please don’t hesitate to reach out."
+          ],
+      ctaLabel: isExistingMember ? "Sign In / Open account" : "Sign Up",
+      ctaUrl: actionUrl
+    })
   });
 
   if (input.existingAccountId) {
     await createPublicAccountNotification({
       publicAccountId: input.existingAccountId,
       notificationType: "PROPERTY_LINKED",
-      title: "A landlord linked you to a property",
-      message: `${input.requestedByName} linked you to ${input.propertySummaryLabel}. Review the property and rent score progress in your renter workspace.`,
-      ctaLabel: "Open queue",
+      title: linkedByAgent ? "Renter Linked by Agent" : "Renter Linked by Landlord",
+      message: linkedByAgent
+        ? `${input.requestedByName} linked you to ${input.propertyAddress}. You will be informed when the landlord makes a decision.`
+        : `You have been linked to ${input.propertyAddress}. You will be notified when the landlord makes a decision.`,
+      ctaLabel: "Open account",
       ctaPath: "/account/renter/queue",
       metadata: {
         propertySummaryLabel: input.propertySummaryLabel,
+        propertyAddress: input.propertyAddress,
         requestedByName: input.requestedByName
       },
       tx: input.tx
@@ -375,7 +452,8 @@ function canUseExistingRenterAccount(account?: PublicAccount | null) {
 }
 
 export async function getWorkspaceOverview(publicAccountId: string) {
-  await getWorkspaceAccount(publicAccountId);
+  const account = await getWorkspaceAccount(publicAccountId);
+  const canViewRentScore = account.accountType === "LANDLORD";
 
   const properties = await prisma.propertyMember.findMany({
     where: { publicAccountId },
@@ -441,7 +519,7 @@ export async function getWorkspaceOverview(publicAccountId: string) {
       status: item.status,
       propertyName: propertySummary(item.property),
       propertyAddress: item.property.address,
-      linkedRentScore: await mapLinkedRentScore(item.renterAccountId),
+      linkedRentScore: canViewRentScore ? await mapLinkedRentScore(item.renterAccountId) : null,
       createdAt: item.createdAt
     }))
   );
@@ -493,7 +571,12 @@ export async function getWorkspaceProfile(publicAccountId: string) {
     throw new AppError("Workspace account not found", 404, "WORKSPACE_ACCOUNT_NOT_FOUND");
   }
 
-  return toWorkspaceProfilePayload(account);
+  const linkedAccounts = await listLinkedWorkspaceAccounts(publicAccountId);
+
+  return {
+    ...toWorkspaceProfilePayload(account),
+    linkedAccounts
+  };
 }
 
 export async function updateWorkspaceProfile(input: {
@@ -638,6 +721,9 @@ export async function createWorkspaceProperty(input: {
 }) {
   return prisma.$transaction(async (tx) => {
     const account = await getWorkspaceAccount(input.publicAccountId, tx);
+    if (account.accountType !== "LANDLORD") {
+      throw new AppError("Only landlord accounts can add properties", 403, "FORBIDDEN");
+    }
     const normalizedLandlordEmail = normalizeEmail(input.landlordEmail);
     const landlordAccount = await tx.publicAccount.findUnique({
       where: { email: normalizedLandlordEmail }
@@ -706,27 +792,6 @@ export async function createWorkspaceProperty(input: {
       }
     });
 
-    if (account.accountType === "AGENT") {
-      await tx.propertyMember.upsert({
-        where: {
-          propertyId_publicAccountId_role: {
-            propertyId: property.id,
-            publicAccountId: account.id,
-            role: "AGENT"
-          }
-        },
-        update: {
-          isPrimary: true
-        },
-        create: {
-          propertyId: property.id,
-          publicAccountId: account.id,
-          role: "AGENT",
-          isPrimary: true
-        }
-      });
-    }
-
     await tx.propertyUnit.createMany({
       data: normalizedUnits.map((unit) => ({
         propertyId: property.id,
@@ -747,6 +812,127 @@ export async function createWorkspaceProperty(input: {
   });
 }
 
+export async function updateWorkspaceProperty(input: {
+  publicAccountId: string;
+  propertyId: string;
+  name: string;
+  ownerName: string;
+  landlordEmail: string;
+  propertyType: string;
+  bedroomCount: number;
+  bathroomCount: number;
+  address: string;
+  state: string;
+  city: string;
+  units: Array<{
+    label: string;
+    bedroomCount: number;
+    bathroomCount: number;
+    isOccupied: boolean;
+    currentTenantName?: string;
+    currentTenantEmail?: string;
+    currentTenantPhone?: string;
+  }>;
+}) {
+  return prisma.$transaction(async (tx) => {
+    const account = await getWorkspaceAccount(input.publicAccountId, tx);
+    if (account.accountType !== "LANDLORD") {
+      throw new AppError("Only landlord accounts can edit properties", 403, "FORBIDDEN");
+    }
+    const membership = await getPropertyMembership(input.publicAccountId, input.propertyId, tx);
+    const normalizedLandlordEmail = normalizeEmail(input.landlordEmail);
+    const landlordAccount = await tx.publicAccount.findUnique({
+      where: { email: normalizedLandlordEmail }
+    });
+
+    if (!landlordAccount || landlordAccount.status !== "ACTIVE" || landlordAccount.accountType !== "LANDLORD") {
+      throw new AppError("Landlord email must belong to an active landlord account", 400, "INVALID_LANDLORD_EMAIL");
+    }
+
+    if (account.accountType === "LANDLORD" && landlordAccount.id !== account.id) {
+      throw new AppError("Landlord properties must be linked to your verified landlord email", 400, "INVALID_LANDLORD_EMAIL");
+    }
+
+    const propertyAddress = input.address.trim();
+    const propertyState = input.state.trim();
+    const propertyCity = input.city.trim();
+    const normalizedUnits = input.units.map((unit, index) => ({
+      label: unit.label.trim() || `Unit ${index + 1}`,
+      bedroomCount: unit.bedroomCount,
+      bathroomCount: unit.bathroomCount,
+      isOccupied: unit.isOccupied,
+      currentTenantName: unit.isOccupied ? unit.currentTenantName?.trim() || null : null,
+      currentTenantEmail: unit.isOccupied ? normalizeOptionalEmail(unit.currentTenantEmail) : null,
+      currentTenantPhone: unit.isOccupied ? unit.currentTenantPhone?.trim() || null : null
+    }));
+    const occupiedUnits = normalizedUnits.filter((unit) => unit.isOccupied);
+    const primaryUnit = normalizedUnits[0];
+
+    await tx.property.update({
+      where: { id: membership.propertyId },
+      data: {
+        name: input.name.trim(),
+        ownerName: input.ownerName.trim(),
+        landlordEmail: normalizedLandlordEmail,
+        address: propertyAddress,
+        state: propertyState,
+        city: propertyCity,
+        propertyType: input.propertyType.trim(),
+        bedroomCount: primaryUnit?.bedroomCount ?? input.bedroomCount,
+        bathroomCount: primaryUnit?.bathroomCount ?? input.bathroomCount,
+        toiletCount: primaryUnit?.bathroomCount ?? input.bathroomCount,
+        unitCount: normalizedUnits.length,
+        isOccupied: occupiedUnits.length > 0,
+        currentTenantName: occupiedUnits.length === 1 ? occupiedUnits[0]?.currentTenantName ?? null : null,
+        currentTenantEmail: occupiedUnits.length === 1 ? occupiedUnits[0]?.currentTenantEmail ?? null : null,
+        currentTenantPhone: occupiedUnits.length === 1 ? occupiedUnits[0]?.currentTenantPhone ?? null : null,
+        createdByAccountId: input.publicAccountId
+      }
+    });
+
+    await tx.propertyMember.upsert({
+      where: {
+        propertyId_publicAccountId_role: {
+          propertyId: membership.propertyId,
+          publicAccountId: landlordAccount.id,
+          role: "LANDLORD"
+        }
+      },
+      update: {
+        isPrimary: true
+      },
+      create: {
+        propertyId: membership.propertyId,
+        publicAccountId: landlordAccount.id,
+        role: "LANDLORD",
+        isPrimary: true
+      }
+    });
+
+    await tx.propertyUnit.deleteMany({
+      where: { propertyId: membership.propertyId }
+    });
+
+    await tx.propertyUnit.createMany({
+      data: normalizedUnits.map((unit) => ({
+        propertyId: membership.propertyId,
+        label: unit.label,
+        address: propertyAddress,
+        state: propertyState,
+        city: propertyCity,
+        bedroomCount: unit.bedroomCount,
+        bathroomCount: unit.bathroomCount,
+        isOccupied: unit.isOccupied,
+        currentTenantName: unit.currentTenantName,
+        currentTenantEmail: unit.currentTenantEmail,
+        currentTenantPhone: unit.currentTenantPhone
+      }))
+    });
+
+    return listWorkspaceProperties(input.publicAccountId);
+  });
+}
+
 export async function shareWorkspaceProperty(input: {
   publicAccountId: string;
   propertyId: string;
@@ -754,6 +940,9 @@ export async function shareWorkspaceProperty(input: {
 }) {
   return prisma.$transaction(async (tx) => {
     const currentAccount = await getWorkspaceAccount(input.publicAccountId, tx);
+    if (currentAccount.accountType !== "LANDLORD") {
+      throw new AppError("Only landlord accounts can link agents to properties", 403, "FORBIDDEN");
+    }
     const membership = await getPropertyMembership(input.publicAccountId, input.propertyId, tx);
     const partner = await tx.publicAccount.findUnique({
       where: { email: normalizeEmail(input.sharedWithEmail) }
@@ -763,7 +952,7 @@ export async function shareWorkspaceProperty(input: {
       throw new AppError("Shared account was not found or is not active", 404, "SHARED_ACCOUNT_NOT_FOUND");
     }
 
-    const expectedType: PublicAccountType = currentAccount.accountType === "AGENT" ? "LANDLORD" : "AGENT";
+    const expectedType: PublicAccountType = "AGENT";
     if (partner.accountType !== expectedType) {
       throw new AppError(`Shared account must be an active ${expectedType.toLowerCase()} account`, 400, "INVALID_SHARED_ACCOUNT");
     }
@@ -790,7 +979,8 @@ export async function shareWorkspaceProperty(input: {
 }
 
 export async function listWorkspaceQueue(publicAccountId: string) {
-  await getWorkspaceAccount(publicAccountId);
+  const account = await getWorkspaceAccount(publicAccountId);
+  const canViewRentScore = account.accountType === "LANDLORD";
 
   const items: any[] = await prisma.proposedRenter.findMany({
     where: {
@@ -804,6 +994,7 @@ export async function listWorkspaceQueue(publicAccountId: string) {
     },
     include: {
       decisionBy: true,
+      propertyUnit: true,
       property: {
         include: {
           members: {
@@ -836,10 +1027,6 @@ export async function listWorkspaceQueue(publicAccountId: string) {
     items: await Promise.all(
       items.map(async (item) => {
         const latestScoreRequest = item.scoreRequests[0] || null;
-        const canShareReviewedScore = isScoreReportApproved({
-          request: latestScoreRequest,
-          payment: item.rentScorePayments[0] || null
-        });
         return {
           id: item.id,
           firstName: item.firstName,
@@ -863,7 +1050,19 @@ export async function listWorkspaceQueue(publicAccountId: string) {
             toiletCount: item.property.toiletCount,
             members: item.property.members.map(memberSummary)
           },
-          linkedRentScore: canShareReviewedScore ? await mapLinkedRentScore(item.renterAccountId) : null,
+          propertyUnit: item.propertyUnit
+            ? {
+                id: item.propertyUnit.id,
+                label: item.propertyUnit.label,
+                summaryLabel: propertyUnitSummary(item.propertyUnit),
+                address: item.propertyUnit.address,
+                city: item.propertyUnit.city,
+                state: item.propertyUnit.state,
+                bedroomCount: item.propertyUnit.bedroomCount,
+                bathroomCount: item.propertyUnit.bathroomCount
+              }
+            : null,
+          linkedRentScore: canViewRentScore ? await mapLinkedRentScore(item.renterAccountId) : null,
           decision: item.decision
             ? {
                 decision: item.decision,
@@ -914,6 +1113,7 @@ export async function listWorkspaceQueue(publicAccountId: string) {
 export async function searchWorkspaceRenters(input: {
   publicAccountId: string;
   propertyId: string;
+  propertyUnitId: string;
   q: string;
 }) {
   await getPropertyMembership(input.publicAccountId, input.propertyId);
@@ -941,7 +1141,8 @@ export async function searchWorkspaceRenters(input: {
     }),
     prisma.proposedRenter.findMany({
       where: {
-        propertyId: input.propertyId
+        propertyUnitId: input.propertyUnitId,
+        decision: null
       },
       select: {
         renterAccountId: true,
@@ -971,6 +1172,7 @@ export async function searchWorkspaceRenters(input: {
 }
 
 export async function getWorkspaceQueueItem(publicAccountId: string, proposedRenterId: string, tx: DbClient = prisma) {
+  const account = await getWorkspaceAccount(publicAccountId, tx);
   const item = await getAccessibleProposedRenter(publicAccountId, proposedRenterId, tx);
 
   const [scoreRequests, paymentSchedules, latestRentScorePayment] = await Promise.all([
@@ -998,13 +1200,10 @@ export async function getWorkspaceQueueItem(publicAccountId: string, proposedRen
   ]);
 
   const latestScoreRequest = scoreRequests[0] || null;
-  const canShareReviewedScore = isScoreReportApproved({
-    request: latestScoreRequest,
-    payment: latestRentScorePayment
-  });
+  const canViewRentScore = account.accountType === "LANDLORD";
   const [linkedRentScore, linkedRentScoreReport] = await Promise.all([
-    canShareReviewedScore ? mapLinkedRentScore(item.renterAccountId) : Promise.resolve(null),
-    canShareReviewedScore ? getLinkedRentScoreReport(item.renterAccountId) : Promise.resolve(null)
+    canViewRentScore ? mapLinkedRentScore(item.renterAccountId) : Promise.resolve(null),
+    canViewRentScore ? getLinkedRentScoreReport(item.renterAccountId) : Promise.resolve(null)
   ]);
   const activities = await tx.proposedRenterActivity.findMany({
     where: { proposedRenterId },
@@ -1053,8 +1252,37 @@ export async function getWorkspaceQueueItem(publicAccountId: string, proposedRen
       bedroomCount: item.property.bedroomCount,
       bathroomCount: item.property.bathroomCount,
       toiletCount: item.property.toiletCount,
-      members: item.property.members.map(memberSummary)
+      members: item.property.members.map(memberSummary),
+      units: (item.property.units || []).map((unit: any) => ({
+        id: unit.id,
+        label: unit.label,
+        address: unit.address,
+        city: unit.city,
+        state: unit.state,
+        bedroomCount: unit.bedroomCount,
+        bathroomCount: unit.bathroomCount,
+        isOccupied: unit.isOccupied,
+        currentTenantName: unit.currentTenantName,
+        currentTenantEmail: unit.currentTenantEmail,
+        currentTenantPhone: unit.currentTenantPhone
+      }))
     },
+    propertyUnit: item.propertyUnit
+      ? {
+          id: item.propertyUnit.id,
+          label: item.propertyUnit.label,
+          summaryLabel: propertyUnitSummary(item.propertyUnit),
+          address: item.propertyUnit.address,
+          city: item.propertyUnit.city,
+          state: item.propertyUnit.state,
+          bedroomCount: item.propertyUnit.bedroomCount,
+          bathroomCount: item.propertyUnit.bathroomCount,
+          isOccupied: item.propertyUnit.isOccupied,
+          currentTenantName: item.propertyUnit.currentTenantName,
+          currentTenantEmail: item.propertyUnit.currentTenantEmail,
+          currentTenantPhone: item.propertyUnit.currentTenantPhone
+        }
+      : null,
     scoreRequests: scoreRequests.map((request) => ({
       id: request.id,
       status: request.status,
@@ -1094,6 +1322,7 @@ export async function getWorkspaceQueueItem(publicAccountId: string, proposedRen
               : null
         }
       : null,
+    availableRentScorePaymentProviders: getAvailableRentScorePaymentProviders(),
     paymentSchedules: paymentSchedules.map((schedule) => ({
       id: schedule.id,
       paymentType: schedule.paymentType,
@@ -1243,13 +1472,7 @@ export async function listAdminLandlordAgentActivities() {
       items.map(async (item) => {
         const latestScoreRequest = item.proposedRenter.scoreRequests[0] || null;
         const latestPayment = item.proposedRenter.rentScorePayments[0] || null;
-        const canApproveShare = Boolean(
-          item.proposedRenter.renterAccountId &&
-            latestScoreRequest &&
-            latestPayment &&
-            latestPayment.status === "SUCCEEDED" &&
-            !latestPayment.reportApprovedAt
-        );
+        const shareStatus = latestScoreRequest ? "APPROVED" : "NOT_REQUESTED";
         return {
           id: item.id,
           activityType: item.activityType,
@@ -1299,12 +1522,8 @@ export async function listAdminLandlordAgentActivities() {
               }
             : null,
           shareApproval: {
-            status: isScoreReportApproved({ request: latestScoreRequest, payment: latestPayment })
-              ? "APPROVED"
-              : latestScoreRequest
-                ? "PENDING"
-                : "NOT_REQUESTED",
-            canApprove: canApproveShare
+            status: shareStatus,
+            canApprove: false
           }
         };
       })
@@ -1315,6 +1534,7 @@ export async function listAdminLandlordAgentActivities() {
 export async function createWorkspaceProposedRenter(input: {
   publicAccountId: string;
   propertyId: string;
+  propertyUnitId: string;
   renterAccountId?: string;
   firstName: string;
   lastName: string;
@@ -1328,8 +1548,23 @@ export async function createWorkspaceProposedRenter(input: {
 }) {
   return prisma.$transaction(async (tx) => {
     const membership = await getPropertyMembership(input.publicAccountId, input.propertyId, tx);
+    const propertyUnit = await tx.propertyUnit.findFirst({
+      where: {
+        id: input.propertyUnitId,
+        propertyId: membership.propertyId
+      }
+    });
+
+    if (!propertyUnit) {
+      throw new AppError("Select a valid property unit", 400, "INVALID_PROPERTY_UNIT");
+    }
+
     const requestedByMember = membership.property.members.find((member) => member.publicAccountId === input.publicAccountId);
     const requestedByName = requestedByMember ? publicAccountDisplayName(requestedByMember.account) : "A landlord";
+    const requestedByAccountType =
+      requestedByMember?.account.accountType === "LANDLORD" || requestedByMember?.account.accountType === "AGENT"
+        ? requestedByMember.account.accountType
+        : null;
 
     const matchedAccount = input.renterAccountId
       ? await tx.publicAccount.findUnique({
@@ -1338,6 +1573,15 @@ export async function createWorkspaceProposedRenter(input: {
       : await tx.publicAccount.findUnique({
           where: { email: normalizeEmail(input.email) }
         });
+
+    if (matchedAccount && matchedAccount.accountType !== "RENTER") {
+      throw new AppError(
+        `This email already belongs to a ${matchedAccount.accountType.toLowerCase()} account. Only renter accounts can be linked as tenants.`,
+        400,
+        "INVALID_RENTER_ACCOUNT"
+      );
+    }
+
     const linkedAccount = canUseExistingRenterAccount(matchedAccount) ? matchedAccount : null;
     const renterEmail = linkedAccount?.email || normalizeEmail(input.email);
     const renterName = linkedAccount
@@ -1347,11 +1591,13 @@ export async function createWorkspaceProposedRenter(input: {
     const existingRenter = await tx.proposedRenter.findFirst({
       where: linkedAccount
         ? {
-            propertyId: input.propertyId,
+            propertyUnitId: input.propertyUnitId,
+            decision: null,
             OR: [{ renterAccountId: linkedAccount.id }, { email: renterEmail }]
           }
         : {
-            propertyId: input.propertyId,
+            propertyUnitId: input.propertyUnitId,
+            decision: null,
             email: renterEmail
           },
       select: {
@@ -1360,12 +1606,25 @@ export async function createWorkspaceProposedRenter(input: {
     });
 
     if (existingRenter) {
-      throw new AppError("This renter is already attached to the selected property queue", 409, "RENTER_ALREADY_QUEUED");
+      throw new AppError("This renter is already attached to the selected unit queue", 409, "RENTER_ALREADY_QUEUED");
+    }
+
+    const existingUnitQueue = await tx.proposedRenter.findFirst({
+      where: {
+        propertyUnitId: input.propertyUnitId,
+        decision: null
+      },
+      select: { id: true }
+    });
+
+    if (existingUnitQueue) {
+      throw new AppError("This unit already has a pending renter", 409, "UNIT_ALREADY_QUEUED");
     }
 
     const renter = await tx.proposedRenter.create({
       data: {
         propertyId: input.propertyId,
+        propertyUnitId: input.propertyUnitId,
         renterAccountId: linkedAccount?.accountType === "RENTER" ? linkedAccount.id : null,
         requestedByAccountId: input.publicAccountId,
         firstName: linkedAccount?.firstName || input.firstName.trim(),
@@ -1383,7 +1642,9 @@ export async function createWorkspaceProposedRenter(input: {
     const inviteState = await notifyProposedRenter({
       requestedByAccountId: input.publicAccountId,
       requestedByName,
-      propertySummaryLabel: propertySummary(membership.property),
+      requestedByAccountType,
+      propertySummaryLabel: [propertySummary(membership.property), propertyUnitSummary(propertyUnit)].filter(Boolean).join(" · "),
+      propertyAddress: [membership.property.address, membership.property.city, membership.property.state].filter(Boolean).join(", "),
       renterEmail,
       renterName,
       existingAccountId: linkedAccount?.status === "ACTIVE" ? linkedAccount.id : null,
@@ -1492,7 +1753,9 @@ export async function resendPendingRenterInvite(input: {
   const inviteState = await notifyProposedRenter({
     requestedByAccountId: input.adminUserId,
     requestedByName: "RentSure admin",
+    requestedByAccountType: "ADMIN",
     propertySummaryLabel: propertySummary(proposedRenter.property),
+    propertyAddress: [proposedRenter.property.address, proposedRenter.property.city, proposedRenter.property.state].filter(Boolean).join(", "),
     renterEmail: proposedRenter.email,
     renterName: proposedRenter.organizationName || `${proposedRenter.firstName} ${proposedRenter.lastName}`.trim(),
     existingAccountId: proposedRenter.renterAccount?.status === "ACTIVE" ? proposedRenter.renterAccount.id : null
@@ -1563,11 +1826,44 @@ export async function requestWorkspaceRentScore(input: {
   proposedRenterId: string;
   notes?: string;
 }) {
-  throw new AppError(
-    "Payment is required before requesting a rent score. Start a payment session instead.",
-    400,
-    "PAYMENT_REQUIRED"
-  );
+  return prisma.$transaction(async (tx) => {
+    const currentAccount = await getWorkspaceAccount(input.publicAccountId, tx);
+    const proposedRenter = await getAccessibleProposedRenter(input.publicAccountId, input.proposedRenterId, tx);
+
+    const existingScoreRequest = await tx.scoreRequest.findFirst({
+      where: { proposedRenterId: proposedRenter.id },
+      select: { id: true }
+    });
+
+    if (existingScoreRequest) {
+      throw new AppError("Rent score has already been requested for this renter", 400, "VALIDATION_ERROR");
+    }
+
+    await tx.scoreRequest.create({
+      data: {
+        proposedRenterId: proposedRenter.id,
+        requestedByAccountId: currentAccount.id,
+        notes: input.notes?.trim() || null,
+        status: "REQUESTED"
+      }
+    });
+
+    await tx.proposedRenter.update({
+      where: { id: proposedRenter.id },
+      data: { status: "SCORE_REQUESTED" }
+    });
+
+    await logProposedRenterActivity({
+      proposedRenterId: proposedRenter.id,
+      actorAccountId: currentAccount.id,
+      activityType: "SCORE_REQUESTED",
+      message: "Rent score review requested for this renter.",
+      metadata: input.notes?.trim() ? ({ note: input.notes.trim() } as Prisma.JsonObject) : undefined,
+      tx
+    });
+
+    return getWorkspaceQueueItem(input.publicAccountId, proposedRenter.id, tx);
+  });
 }
 
 export async function forwardWorkspaceScoreRequest(input: {
