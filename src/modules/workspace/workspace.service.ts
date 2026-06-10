@@ -1609,18 +1609,6 @@ export async function createWorkspaceProposedRenter(input: {
       throw new AppError("This renter is already attached to the selected unit queue", 409, "RENTER_ALREADY_QUEUED");
     }
 
-    const existingUnitQueue = await tx.proposedRenter.findFirst({
-      where: {
-        propertyUnitId: input.propertyUnitId,
-        decision: null
-      },
-      select: { id: true }
-    });
-
-    if (existingUnitQueue) {
-      throw new AppError("This unit already has a pending renter", 409, "UNIT_ALREADY_QUEUED");
-    }
-
     const renter = await tx.proposedRenter.create({
       data: {
         propertyId: input.propertyId,
@@ -1795,6 +1783,29 @@ export async function decideWorkspaceProposedRenter(input: {
     const proposedRenter = await getAccessibleProposedRenter(input.publicAccountId, input.proposedRenterId, tx);
     const nextStatus = input.decision === "HOLD" ? "UNDER_REVIEW" : "DECISION_READY";
 
+    if (input.decision === "APPROVED" && proposedRenter.propertyUnitId) {
+      const conflictingOccupancy = await tx.propertyUnit.findFirst({
+        where: {
+          id: proposedRenter.propertyUnitId,
+          isOccupied: true,
+          OR: [
+            { currentTenantEmail: { not: proposedRenter.email } },
+            { currentTenantPhone: { not: proposedRenter.phone } },
+            { currentTenantName: { not: `${proposedRenter.firstName} ${proposedRenter.lastName}`.trim() } }
+          ]
+        },
+        select: { id: true }
+      });
+
+      if (conflictingOccupancy) {
+        throw new AppError(
+          "This unit is already marked as occupied by another renter",
+          400,
+          "UNIT_ALREADY_OCCUPIED"
+        );
+      }
+    }
+
     await tx.proposedRenter.update({
       where: { id: proposedRenter.id },
       data: {
@@ -1805,6 +1816,52 @@ export async function decideWorkspaceProposedRenter(input: {
         status: nextStatus
       } as any
     });
+
+    if (input.decision === "APPROVED") {
+      if (proposedRenter.propertyUnitId) {
+        await tx.propertyUnit.update({
+          where: { id: proposedRenter.propertyUnitId },
+          data: {
+            isOccupied: true,
+            currentTenantName: `${proposedRenter.firstName} ${proposedRenter.lastName}`.trim(),
+            currentTenantEmail: proposedRenter.email,
+            currentTenantPhone: proposedRenter.phone
+          }
+        });
+
+        const occupiedUnits = await tx.propertyUnit.findMany({
+          where: {
+            propertyId: proposedRenter.propertyId,
+            isOccupied: true
+          },
+          select: {
+            currentTenantName: true,
+            currentTenantEmail: true,
+            currentTenantPhone: true
+          }
+        });
+
+        await tx.property.update({
+          where: { id: proposedRenter.propertyId },
+          data: {
+            isOccupied: occupiedUnits.length > 0,
+            currentTenantName: occupiedUnits.length === 1 ? occupiedUnits[0]?.currentTenantName ?? null : null,
+            currentTenantEmail: occupiedUnits.length === 1 ? occupiedUnits[0]?.currentTenantEmail ?? null : null,
+            currentTenantPhone: occupiedUnits.length === 1 ? occupiedUnits[0]?.currentTenantPhone ?? null : null
+          }
+        });
+      } else {
+        await tx.property.update({
+          where: { id: proposedRenter.propertyId },
+          data: {
+            isOccupied: true,
+            currentTenantName: `${proposedRenter.firstName} ${proposedRenter.lastName}`.trim(),
+            currentTenantEmail: proposedRenter.email,
+            currentTenantPhone: proposedRenter.phone
+          }
+        });
+      }
+    }
 
     await logProposedRenterActivity({
       proposedRenterId: proposedRenter.id,

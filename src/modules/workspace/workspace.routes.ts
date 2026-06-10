@@ -20,6 +20,7 @@ import {
   saveWorkspacePassportPhoto,
   searchWorkspaceRenters,
   shareWorkspaceProperty,
+  updateWorkspaceProperty,
   updateWorkspaceProfile,
   updateWorkspacePaymentSchedule
 } from "./workspace.service";
@@ -74,6 +75,7 @@ const sharePropertySchema = z.object({
 
 const proposedRenterSchema = z.object({
   propertyId: z.string().uuid(),
+  propertyUnitId: z.string().uuid(),
   renterAccountId: z.string().uuid().optional(),
   firstName: z.string().trim().min(1).max(120),
   lastName: z.string().trim().min(1).max(120),
@@ -235,6 +237,21 @@ router.post("/workspace/properties", async (req, res, next) => {
   }
 });
 
+router.patch("/workspace/properties/:propertyId", async (req, res, next) => {
+  try {
+    const params = z.object({ propertyId: z.string().uuid() }).parse(req.params);
+    const body = propertySchema.parse(req.body);
+    const result = await updateWorkspaceProperty({
+      publicAccountId: req.user!.userId,
+      propertyId: params.propertyId,
+      ...body
+    });
+    res.json(result);
+  } catch (error) {
+    next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid property payload", 400, "VALIDATION_ERROR") : error);
+  }
+});
+
 router.post("/workspace/properties/:propertyId/share", async (req, res, next) => {
   try {
     const params = z.object({ propertyId: z.string().uuid() }).parse(req.params);
@@ -264,12 +281,14 @@ router.get("/workspace/renter-search", async (req, res, next) => {
     const query = z
       .object({
         propertyId: z.string().uuid(),
+        propertyUnitId: z.string().uuid(),
         q: z.string().trim().min(2)
       })
       .parse(req.query);
     const result = await searchWorkspaceRenters({
       publicAccountId: req.user!.userId,
       propertyId: query.propertyId,
+      propertyUnitId: query.propertyUnitId,
       q: query.q
     });
     res.json(result);
