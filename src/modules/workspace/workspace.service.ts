@@ -503,7 +503,15 @@ export async function getWorkspaceOverview(publicAccountId: string) {
       where: {
         propertyId: { in: propertyIds.length ? propertyIds : ["__none__"] }
       },
-      include: {
+      select: {
+        id: true,
+        organizationName: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        status: true,
+        renterAccountId: true,
+        createdAt: true,
         property: true
       },
       orderBy: { createdAt: "desc" },
