@@ -105,6 +105,40 @@ function isMissingProposedRenterPropertyUnitColumn(error: unknown) {
   );
 }
 
+let proposedRenterPropertyUnitColumnSupported: boolean | null = null;
+let proposedRenterPropertyUnitColumnProbe: Promise<boolean> | null = null;
+
+async function supportsProposedRenterPropertyUnitColumn() {
+  if (proposedRenterPropertyUnitColumnSupported !== null) {
+    return proposedRenterPropertyUnitColumnSupported;
+  }
+
+  if (!proposedRenterPropertyUnitColumnProbe) {
+    proposedRenterPropertyUnitColumnProbe = prisma.proposedRenter
+      .findFirst({
+        select: {
+          propertyUnitId: true
+        }
+      } as any)
+      .then(() => {
+        proposedRenterPropertyUnitColumnSupported = true;
+        return true;
+      })
+      .catch((error: unknown) => {
+        if (isMissingProposedRenterPropertyUnitColumn(error)) {
+          proposedRenterPropertyUnitColumnSupported = false;
+          return false;
+        }
+        throw error;
+      })
+      .finally(() => {
+        proposedRenterPropertyUnitColumnProbe = null;
+      });
+  }
+
+  return proposedRenterPropertyUnitColumnProbe;
+}
+
 async function getWorkspaceAccount(publicAccountId: string, tx: DbClient = prisma) {
   const account = await tx.publicAccount.findUnique({ where: { id: publicAccountId } });
   if (!account || account.status !== "ACTIVE") {
@@ -231,9 +265,10 @@ async function getPropertyMembership(publicAccountId: string, propertyId: string
 
 async function getAccessibleProposedRenter(publicAccountId: string, proposedRenterId: string, tx: DbClient = prisma): Promise<any> {
   await getWorkspaceAccount(publicAccountId, tx);
+  const supportsPropertyUnitColumn = await supportsProposedRenterPropertyUnitColumn();
 
-  const renter = await tx.proposedRenter
-    .findFirst({
+  const renter = supportsPropertyUnitColumn
+    ? await tx.proposedRenter.findFirst({
       where: {
         id: proposedRenterId,
         property: {
@@ -261,58 +296,53 @@ async function getAccessibleProposedRenter(publicAccountId: string, proposedRent
         }
       }
     } as any)
-    .catch((error: unknown) => {
-      if (isMissingProposedRenterPropertyUnitColumn(error)) {
-        return tx.proposedRenter.findFirst({
-          where: {
-            id: proposedRenterId,
-            property: {
-              members: {
-                some: {
-                  publicAccountId
-                }
-              }
-            }
-          },
-          select: {
-            id: true,
-            propertyId: true,
-            renterAccountId: true,
-            requestedByAccountId: true,
-            firstName: true,
-            lastName: true,
-            organizationName: true,
-            email: true,
-            phone: true,
-            address: true,
-            state: true,
-            city: true,
-            status: true,
-            decision: true,
-            decisionAt: true,
-            decisionByAccountId: true,
-            decisionNote: true,
-            notes: true,
-            createdAt: true,
-            updatedAt: true,
-            decisionBy: true,
-            property: {
-              include: {
-                members: {
-                  include: {
-                    account: true
-                  }
-                },
-                units: {
-                  orderBy: { createdAt: "asc" }
-                }
+    : await tx.proposedRenter.findFirst({
+        where: {
+          id: proposedRenterId,
+          property: {
+            members: {
+              some: {
+                publicAccountId
               }
             }
           }
-        });
-      }
-      throw error;
-    });
+        },
+        select: {
+          id: true,
+          propertyId: true,
+          renterAccountId: true,
+          requestedByAccountId: true,
+          firstName: true,
+          lastName: true,
+          organizationName: true,
+          email: true,
+          phone: true,
+          address: true,
+          state: true,
+          city: true,
+          status: true,
+          decision: true,
+          decisionAt: true,
+          decisionByAccountId: true,
+          decisionNote: true,
+          notes: true,
+          createdAt: true,
+          updatedAt: true,
+          decisionBy: true,
+          property: {
+            include: {
+              members: {
+                include: {
+                  account: true
+                }
+              },
+              units: {
+                orderBy: { createdAt: "asc" }
+              }
+            }
+          }
+        }
+      });
 
   if (!renter) {
     throw new AppError("Proposed renter not found", 404, "PROPOSED_RENTER_NOT_FOUND");
@@ -1704,6 +1734,8 @@ export async function createWorkspaceProposedRenter(input: {
   city?: string;
   notes?: string;
 }) {
+  const supportsPropertyUnitColumn = await supportsProposedRenterPropertyUnitColumn();
+
   return prisma.$transaction(async (tx) => {
     const membership = await getPropertyMembership(input.publicAccountId, input.propertyId, tx);
     const propertyUnit = await tx.propertyUnit.findFirst({
@@ -1746,9 +1778,9 @@ export async function createWorkspaceProposedRenter(input: {
       ? publicAccountDisplayName(linkedAccount)
       : [input.firstName.trim(), input.lastName.trim()].filter(Boolean).join(" ");
 
-    const existingRenter = await tx.proposedRenter
-      .findFirst({
-        where: linkedAccount
+    const existingRenter = await tx.proposedRenter.findFirst({
+      where: supportsPropertyUnitColumn
+        ? linkedAccount
           ? {
               propertyUnitId: input.propertyUnitId,
               decision: null,
@@ -1758,32 +1790,22 @@ export async function createWorkspaceProposedRenter(input: {
               propertyUnitId: input.propertyUnitId,
               decision: null,
               email: renterEmail
-            },
-        select: {
-          id: true
-        }
-      })
-      .catch((error: unknown) => {
-        if (isMissingProposedRenterPropertyUnitColumn(error)) {
-          return tx.proposedRenter.findFirst({
-            where: linkedAccount
-              ? {
-                  propertyId: input.propertyId,
-                  decision: null,
-                  OR: [{ renterAccountId: linkedAccount.id }, { email: renterEmail }]
-                }
-              : {
-                  propertyId: input.propertyId,
-                  decision: null,
-                  email: renterEmail
-                },
-            select: {
-              id: true
             }
-          });
-        }
-        throw error;
-      });
+        : linkedAccount
+          ? {
+              propertyId: input.propertyId,
+              decision: null,
+              OR: [{ renterAccountId: linkedAccount.id }, { email: renterEmail }]
+            }
+          : {
+              propertyId: input.propertyId,
+              decision: null,
+              email: renterEmail
+            },
+      select: {
+        id: true
+      }
+    });
 
     if (existingRenter) {
       throw new AppError("This renter is already attached to the selected unit queue", 409, "RENTER_ALREADY_QUEUED");
@@ -1805,17 +1827,13 @@ export async function createWorkspaceProposedRenter(input: {
       notes: input.notes?.trim() || null
     };
 
-    const renter = await tx.proposedRenter.create({
-      data: createPayload
-    }).catch((error: unknown) => {
-      if (isMissingProposedRenterPropertyUnitColumn(error)) {
-        const { propertyUnitId: _omittedPropertyUnitId, ...legacyPayload } = createPayload;
-        return tx.proposedRenter.create({
-          data: legacyPayload
+    const renter = supportsPropertyUnitColumn
+      ? await tx.proposedRenter.create({
+          data: createPayload
+        })
+      : await tx.proposedRenter.create({
+          data: (({ propertyUnitId: _omittedPropertyUnitId, ...legacyPayload }) => legacyPayload)(createPayload)
         });
-      }
-      throw error;
-    });
 
     const inviteState = await notifyProposedRenter({
       requestedByAccountId: input.publicAccountId,
