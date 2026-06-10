@@ -79,6 +79,93 @@ function isMissingRentScorePaymentTable(error: unknown) {
   );
 }
 
+function isMissingProposedRenterPropertyUnitColumn(error: unknown) {
+  const meta =
+    typeof error === "object" &&
+    error !== null &&
+    "meta" in error &&
+    typeof (error as { meta?: unknown }).meta === "object" &&
+    (error as { meta?: unknown }).meta !== null
+      ? ((error as { meta: { column?: unknown } }).meta as { column?: unknown })
+      : null;
+  const column = typeof meta?.column === "string" ? meta.column : null;
+
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "P2022" &&
+    column === "ProposedRenter.propertyUnitId"
+  );
+}
+
+function getLinkedRenterCases(publicAccountId: string) {
+  return prisma.proposedRenter
+    .findMany({
+      where: { renterAccountId: publicAccountId },
+      include: {
+        property: true,
+        scoreRequests: {
+          include: {
+            requestedBy: true,
+            forwardedTo: true
+          },
+          orderBy: { createdAt: "desc" }
+        },
+        paymentSchedules: {
+          include: {
+            createdBy: true
+          },
+          orderBy: [{ dueDate: "asc" }, { createdAt: "desc" }]
+        },
+        activities: {
+          include: {
+            actor: true
+          },
+          orderBy: { createdAt: "desc" },
+          take: 8
+        }
+      },
+      orderBy: { createdAt: "desc" }
+    })
+    .catch((error: unknown) => {
+      if (isMissingProposedRenterPropertyUnitColumn(error)) {
+        return prisma.proposedRenter.findMany({
+          where: { renterAccountId: publicAccountId },
+          select: {
+            id: true,
+            status: true,
+            decision: true,
+            decisionNote: true,
+            property: true,
+            scoreRequests: {
+              include: {
+                requestedBy: true,
+                forwardedTo: true
+              },
+              orderBy: { createdAt: "desc" }
+            },
+            paymentSchedules: {
+              include: {
+                createdBy: true
+              },
+              orderBy: [{ dueDate: "asc" }, { createdAt: "desc" }]
+            },
+            activities: {
+              include: {
+                actor: true
+              },
+              orderBy: { createdAt: "desc" },
+              take: 8
+            }
+          },
+          orderBy: { createdAt: "desc" }
+        });
+      }
+      throw error;
+    });
+}
+
 async function getRenterAccount(publicAccountId: string) {
   const account = await prisma.publicAccount.findUnique({
     where: { id: publicAccountId },
@@ -255,33 +342,7 @@ export async function getRenterDashboard(publicAccountId: string) {
   const [account, rentScore, linkedCases, shareHistory, notifications, rentScorePurchases] = await Promise.all([
     getRenterAccount(publicAccountId),
     buildRentScoreSnapshot(publicAccountId),
-    prisma.proposedRenter.findMany({
-      where: { renterAccountId: publicAccountId },
-      include: {
-        property: true,
-        scoreRequests: {
-          include: {
-            requestedBy: true,
-            forwardedTo: true
-          },
-          orderBy: { createdAt: "desc" }
-        },
-        paymentSchedules: {
-          include: {
-            createdBy: true
-          },
-          orderBy: [{ dueDate: "asc" }, { createdAt: "desc" }]
-        },
-        activities: {
-          include: {
-            actor: true
-          },
-          orderBy: { createdAt: "desc" },
-          take: 8
-        }
-      },
-      orderBy: { createdAt: "desc" }
-    }),
+    getLinkedRenterCases(publicAccountId),
     shareHistoryPromise,
     notificationsPromise,
     rentScorePurchasesPromise
