@@ -440,6 +440,7 @@ model PropertyUnit {
   updatedAt          DateTime  @updatedAt
 
   property   Property   @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  proposedRenters ProposedRenter[]
 
   @@index([propertyId, createdAt])
 }
@@ -462,6 +463,7 @@ model PropertyMember {
 model ProposedRenter {
   id                 String                @id @default(uuid())
   propertyId         String
+  propertyUnitId     String?
   renterAccountId    String?
   requestedByAccountId String
   firstName          String
@@ -482,6 +484,7 @@ model ProposedRenter {
   updatedAt          DateTime              @updatedAt
 
   property           Property              @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  propertyUnit       PropertyUnit?         @relation(fields: [propertyUnitId], references: [id], onDelete: SetNull)
   renterAccount      PublicAccount?        @relation("LinkedRenterAccount", fields: [renterAccountId], references: [id], onDelete: SetNull)
   requestedBy        PublicAccount         @relation("ProposedRenterRequester", fields: [requestedByAccountId], references: [id], onDelete: Cascade)
   decisionBy         PublicAccount?        @relation("ProposedRenterDecisionBy", fields: [decisionByAccountId], references: [id], onDelete: SetNull)
@@ -491,6 +494,7 @@ model ProposedRenter {
   activities         ProposedRenterActivity[]
 
   @@index([propertyId, status])
+  @@index([propertyUnitId, status])
   @@index([renterAccountId])
   @@index([requestedByAccountId])
   @@index([decisionByAccountId])

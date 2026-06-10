@@ -7,6 +7,29 @@ import { getWorkspaceQueueItem } from "../workspace/workspace.service";
 
 type DbClient = Prisma.TransactionClient | typeof prisma;
 
+export function getAvailableRentScorePaymentProviders(): RentScorePaymentProvider[] {
+  const providers: RentScorePaymentProvider[] = [];
+
+  if (env.PAYSTACK_SECRET_KEY) {
+    providers.push("PAYSTACK");
+  }
+
+  if (env.FLUTTERWAVE_SECRET_KEY) {
+    providers.push("FLUTTERWAVE");
+  }
+
+  const hasManualTransferConfig =
+    Boolean(env.RENT_SCORE_MANUAL_BANK_NAME) &&
+    Boolean(env.RENT_SCORE_MANUAL_ACCOUNT_NAME) &&
+    Boolean(env.RENT_SCORE_MANUAL_ACCOUNT_NUMBER);
+
+  if (hasManualTransferConfig || process.env.NODE_ENV !== "production") {
+    providers.push("MANUAL_TRANSFER");
+  }
+
+  return providers;
+}
+
 function publicAccountDisplayName(account: {
   firstName?: string | null;
   lastName?: string | null;
