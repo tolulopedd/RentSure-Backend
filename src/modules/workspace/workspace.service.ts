@@ -92,16 +92,19 @@ function isMissingProposedRenterPropertyUnitColumn(error: unknown) {
     "meta" in error &&
     typeof (error as { meta?: unknown }).meta === "object" &&
     (error as { meta?: unknown }).meta !== null
-      ? ((error as { meta: { column?: unknown } }).meta as { column?: unknown })
+      ? ((error as { meta: Record<string, unknown> }).meta as Record<string, unknown>)
       : null;
+  const code = typeof (error as { code?: unknown })?.code === "string" ? (error as { code: string }).code : null;
   const column = typeof meta?.column === "string" ? meta.column : null;
+  const rawCode = typeof meta?.code === "string" ? meta.code : null;
+  const rawMessage = typeof meta?.message === "string" ? meta.message : null;
 
   return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    error.code === "P2022" &&
-    column === "ProposedRenter.propertyUnitId"
+    (code === "P2022" && column === "ProposedRenter.propertyUnitId") ||
+    (code === "P2010" &&
+      rawCode === "42703" &&
+      typeof rawMessage === "string" &&
+      rawMessage.includes('column "propertyUnitId" does not exist'))
   );
 }
 
