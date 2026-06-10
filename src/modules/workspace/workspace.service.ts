@@ -139,6 +139,11 @@ async function supportsProposedRenterPropertyUnitColumn() {
   return proposedRenterPropertyUnitColumnProbe;
 }
 
+function markProposedRenterPropertyUnitColumnUnsupported() {
+  proposedRenterPropertyUnitColumnSupported = false;
+  proposedRenterPropertyUnitColumnProbe = null;
+}
+
 async function getWorkspaceAccount(publicAccountId: string, tx: DbClient = prisma) {
   const account = await tx.publicAccount.findUnique({ where: { id: publicAccountId } });
   if (!account || account.status !== "ACTIVE") {
@@ -1734,7 +1739,7 @@ export async function createWorkspaceProposedRenter(input: {
   city?: string;
   notes?: string;
 }) {
-  const supportsPropertyUnitColumn = await supportsProposedRenterPropertyUnitColumn();
+  let supportsPropertyUnitColumn = await supportsProposedRenterPropertyUnitColumn();
 
   return prisma.$transaction(async (tx) => {
     const membership = await getPropertyMembership(input.publicAccountId, input.propertyId, tx);
@@ -1778,34 +1783,47 @@ export async function createWorkspaceProposedRenter(input: {
       ? publicAccountDisplayName(linkedAccount)
       : [input.firstName.trim(), input.lastName.trim()].filter(Boolean).join(" ");
 
-    const existingRenter = await tx.proposedRenter.findFirst({
-      where: supportsPropertyUnitColumn
-        ? linkedAccount
-          ? {
-              propertyUnitId: input.propertyUnitId,
-              decision: null,
-              OR: [{ renterAccountId: linkedAccount.id }, { email: renterEmail }]
-            }
-          : {
-              propertyUnitId: input.propertyUnitId,
-              decision: null,
-              email: renterEmail
-            }
-        : linkedAccount
-          ? {
-              propertyId: input.propertyId,
-              decision: null,
-              OR: [{ renterAccountId: linkedAccount.id }, { email: renterEmail }]
-            }
-          : {
-              propertyId: input.propertyId,
-              decision: null,
-              email: renterEmail
-            },
-      select: {
-        id: true
+    const findExistingRenter = async (usePropertyUnitColumn: boolean) =>
+      tx.proposedRenter.findFirst({
+        where: usePropertyUnitColumn
+          ? linkedAccount
+            ? {
+                propertyUnitId: input.propertyUnitId,
+                decision: null,
+                OR: [{ renterAccountId: linkedAccount.id }, { email: renterEmail }]
+              }
+            : {
+                propertyUnitId: input.propertyUnitId,
+                decision: null,
+                email: renterEmail
+              }
+          : linkedAccount
+            ? {
+                propertyId: input.propertyId,
+                decision: null,
+                OR: [{ renterAccountId: linkedAccount.id }, { email: renterEmail }]
+              }
+            : {
+                propertyId: input.propertyId,
+                decision: null,
+                email: renterEmail
+              },
+        select: {
+          id: true
+        }
+      });
+
+    let existingRenter;
+    try {
+      existingRenter = await findExistingRenter(supportsPropertyUnitColumn);
+    } catch (error: unknown) {
+      if (!supportsPropertyUnitColumn || !isMissingProposedRenterPropertyUnitColumn(error)) {
+        throw error;
       }
-    });
+      markProposedRenterPropertyUnitColumnUnsupported();
+      supportsPropertyUnitColumn = false;
+      existingRenter = await findExistingRenter(false);
+    }
 
     if (existingRenter) {
       throw new AppError("This renter is already attached to the selected unit queue", 409, "RENTER_ALREADY_QUEUED");
@@ -1827,13 +1845,27 @@ export async function createWorkspaceProposedRenter(input: {
       notes: input.notes?.trim() || null
     };
 
-    const renter = supportsPropertyUnitColumn
-      ? await tx.proposedRenter.create({
-          data: createPayload
-        })
-      : await tx.proposedRenter.create({
-          data: (({ propertyUnitId: _omittedPropertyUnitId, ...legacyPayload }) => legacyPayload)(createPayload)
-        });
+    const legacyCreatePayload = (({ propertyUnitId: _omittedPropertyUnitId, ...legacyPayload }) => legacyPayload)(createPayload);
+
+    let renter;
+    try {
+      renter = supportsPropertyUnitColumn
+        ? await tx.proposedRenter.create({
+            data: createPayload
+          })
+        : await tx.proposedRenter.create({
+            data: legacyCreatePayload
+          });
+    } catch (error: unknown) {
+      if (!supportsPropertyUnitColumn || !isMissingProposedRenterPropertyUnitColumn(error)) {
+        throw error;
+      }
+      markProposedRenterPropertyUnitColumnUnsupported();
+      supportsPropertyUnitColumn = false;
+      renter = await tx.proposedRenter.create({
+        data: legacyCreatePayload
+      });
+    }
 
     const inviteState = await notifyProposedRenter({
       requestedByAccountId: input.publicAccountId,
