@@ -729,8 +729,10 @@ export async function listWorkspaceProperties(publicAccountId: string) {
           units: {
             orderBy: { createdAt: "asc" }
           },
-          proposedRenters: {
-            orderBy: { createdAt: "desc" }
+          _count: {
+            select: {
+              proposedRenters: true
+            }
           }
         }
       }
@@ -764,7 +766,7 @@ export async function listWorkspaceProperties(publicAccountId: string) {
       membershipRole: entry.role,
       createdAt: entry.property.createdAt,
       members: entry.property.members.map(memberSummary),
-      proposedRenterCount: entry.property.proposedRenters.length,
+      proposedRenterCount: entry.property._count.proposedRenters,
       units: entry.property.units.map((unit) => ({
         id: unit.id,
         label: unit.label,
