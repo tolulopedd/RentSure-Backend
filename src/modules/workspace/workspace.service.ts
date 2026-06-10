@@ -270,84 +270,97 @@ async function getPropertyMembership(publicAccountId: string, propertyId: string
 
 async function getAccessibleProposedRenter(publicAccountId: string, proposedRenterId: string, tx: DbClient = prisma): Promise<any> {
   await getWorkspaceAccount(publicAccountId, tx);
-  const supportsPropertyUnitColumn = await supportsProposedRenterPropertyUnitColumn();
+  let supportsPropertyUnitColumn = await supportsProposedRenterPropertyUnitColumn();
 
-  const renter = supportsPropertyUnitColumn
-    ? await tx.proposedRenter.findFirst({
-      where: {
-        id: proposedRenterId,
-        property: {
-          members: {
-            some: {
-              publicAccountId
-            }
-          }
-        }
-      },
-      include: {
-        decisionBy: true,
-        propertyUnit: true,
-        property: {
-          include: {
-            members: {
-              include: {
-                account: true
-              }
-            },
-            units: {
-              orderBy: { createdAt: "asc" }
-            }
-          }
-        }
-      }
-    } as any)
-    : await tx.proposedRenter.findFirst({
-        where: {
-          id: proposedRenterId,
-          property: {
-            members: {
-              some: {
-                publicAccountId
-              }
-            }
-          }
-        },
-        select: {
-          id: true,
-          propertyId: true,
-          renterAccountId: true,
-          requestedByAccountId: true,
-          firstName: true,
-          lastName: true,
-          organizationName: true,
-          email: true,
-          phone: true,
-          address: true,
-          state: true,
-          city: true,
-          status: true,
-          decision: true,
-          decisionAt: true,
-          decisionByAccountId: true,
-          decisionNote: true,
-          notes: true,
-          createdAt: true,
-          updatedAt: true,
-          decisionBy: true,
-          property: {
-            include: {
+  const loadRenter = (usePropertyUnitColumn: boolean) =>
+    usePropertyUnitColumn
+      ? tx.proposedRenter.findFirst({
+          where: {
+            id: proposedRenterId,
+            property: {
               members: {
-                include: {
-                  account: true
+                some: {
+                  publicAccountId
                 }
-              },
-              units: {
-                orderBy: { createdAt: "asc" }
+              }
+            }
+          },
+          include: {
+            decisionBy: true,
+            propertyUnit: true,
+            property: {
+              include: {
+                members: {
+                  include: {
+                    account: true
+                  }
+                },
+                units: {
+                  orderBy: { createdAt: "asc" }
+                }
               }
             }
           }
-        }
-      });
+        } as any)
+      : tx.proposedRenter.findFirst({
+          where: {
+            id: proposedRenterId,
+            property: {
+              members: {
+                some: {
+                  publicAccountId
+                }
+              }
+            }
+          },
+          select: {
+            id: true,
+            propertyId: true,
+            renterAccountId: true,
+            requestedByAccountId: true,
+            firstName: true,
+            lastName: true,
+            organizationName: true,
+            email: true,
+            phone: true,
+            address: true,
+            state: true,
+            city: true,
+            status: true,
+            decision: true,
+            decisionAt: true,
+            decisionByAccountId: true,
+            decisionNote: true,
+            notes: true,
+            createdAt: true,
+            updatedAt: true,
+            decisionBy: true,
+            property: {
+              include: {
+                members: {
+                  include: {
+                    account: true
+                  }
+                },
+                units: {
+                  orderBy: { createdAt: "asc" }
+                }
+              }
+            }
+          }
+        });
+
+  let renter;
+  try {
+    renter = await loadRenter(supportsPropertyUnitColumn);
+  } catch (error: unknown) {
+    if (!supportsPropertyUnitColumn || !isMissingProposedRenterPropertyUnitColumn(error)) {
+      throw error;
+    }
+    markProposedRenterPropertyUnitColumnUnsupported();
+    supportsPropertyUnitColumn = false;
+    renter = await loadRenter(false);
+  }
 
   if (!renter) {
     throw new AppError("Proposed renter not found", 404, "PROPOSED_RENTER_NOT_FOUND");
@@ -1585,7 +1598,15 @@ export async function listAdminRenterActivities() {
     include: {
       actor: true,
       proposedRenter: {
-        include: {
+        select: {
+          id: true,
+          renterAccountId: true,
+          firstName: true,
+          lastName: true,
+          organizationName: true,
+          email: true,
+          status: true,
+          decision: true,
           property: true,
           renterAccount: true
         }
@@ -1639,7 +1660,15 @@ export async function listAdminLandlordAgentActivities() {
     include: {
       actor: true,
       proposedRenter: {
-        include: {
+        select: {
+          id: true,
+          renterAccountId: true,
+          firstName: true,
+          lastName: true,
+          organizationName: true,
+          email: true,
+          status: true,
+          decision: true,
           property: true,
           rentScorePayments: {
             orderBy: { createdAt: "desc" },
@@ -1851,10 +1880,22 @@ export async function createWorkspaceProposedRenter(input: {
     try {
       renter = supportsPropertyUnitColumn
         ? await tx.proposedRenter.create({
-            data: createPayload
+            data: createPayload,
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              organizationName: true
+            }
           })
         : await tx.proposedRenter.create({
-            data: legacyCreatePayload
+            data: legacyCreatePayload,
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              organizationName: true
+            }
           });
     } catch (error: unknown) {
       if (!supportsPropertyUnitColumn || !isMissingProposedRenterPropertyUnitColumn(error)) {
@@ -1863,7 +1904,13 @@ export async function createWorkspaceProposedRenter(input: {
       markProposedRenterPropertyUnitColumnUnsupported();
       supportsPropertyUnitColumn = false;
       renter = await tx.proposedRenter.create({
-        data: legacyCreatePayload
+        data: legacyCreatePayload,
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          organizationName: true
+        }
       });
     }
 
@@ -2109,7 +2156,8 @@ export async function decideWorkspaceProposedRenter(input: {
         decisionByAccountId: input.publicAccountId,
         decisionNote: input.note?.trim() || null,
         status: nextStatus
-      } as any
+      } as any,
+      select: { id: true }
     });
 
     if (input.decision === "APPROVED") {
@@ -2202,7 +2250,8 @@ export async function requestWorkspaceRentScore(input: {
 
     await tx.proposedRenter.update({
       where: { id: proposedRenter.id },
-      data: { status: "SCORE_REQUESTED" }
+      data: { status: "SCORE_REQUESTED" },
+      select: { id: true }
     });
 
     await logProposedRenterActivity({
@@ -2242,9 +2291,11 @@ export async function forwardWorkspaceScoreRequest(input: {
           }
         }
       },
-      include: {
+      select: {
+        id: true,
         proposedRenter: {
-          include: {
+          select: {
+            id: true,
             property: {
               include: {
                 members: {
@@ -2286,7 +2337,8 @@ export async function forwardWorkspaceScoreRequest(input: {
 
     await tx.proposedRenter.update({
       where: { id: scoreRequest.proposedRenter.id },
-      data: { status: "SCORE_SHARED" }
+      data: { status: "SCORE_SHARED" },
+      select: { id: true }
     });
 
     await logProposedRenterActivity({

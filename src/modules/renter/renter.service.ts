@@ -573,9 +573,6 @@ export async function confirmRenterPayment(input: {
       proposedRenter: {
         renterAccountId: input.publicAccountId
       }
-    },
-    include: {
-      proposedRenter: true
     }
   });
 
@@ -698,8 +695,18 @@ export async function createSelfInitiatedRenterPayment(input: {
       renterAccountId: input.publicAccountId,
       decision: { not: "DECLINED" }
     },
-    include: {
-      property: true
+    select: {
+      id: true,
+      propertyId: true,
+      property: {
+        select: {
+          id: true,
+          name: true,
+          address: true,
+          city: true,
+          state: true
+        }
+      }
     }
   });
 
@@ -782,8 +789,18 @@ export async function shareRenterScoreReport(input: {
     buildRentScoreSnapshot(account.id),
     prisma.proposedRenter.findMany({
       where: { renterAccountId: account.id },
-      include: {
-        property: true
+      select: {
+        id: true,
+        decision: true,
+        status: true,
+        property: {
+          select: {
+            name: true,
+            address: true,
+            city: true,
+            state: true
+          }
+        }
       },
       orderBy: { createdAt: "desc" }
     })

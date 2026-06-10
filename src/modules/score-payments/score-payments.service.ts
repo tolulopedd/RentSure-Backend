@@ -79,7 +79,15 @@ async function getAccessibleProposedRenter(publicAccountId: string, proposedRent
         }
       }
     },
-    include: {
+    select: {
+      id: true,
+      propertyId: true,
+      requestedByAccountId: true,
+      firstName: true,
+      lastName: true,
+      organizationName: true,
+      email: true,
+      status: true,
       property: true,
       requestedBy: true
     }
@@ -181,7 +189,8 @@ async function createPaidScoreRequest(tx: DbClient, payment: {
 
   await tx.proposedRenter.update({
     where: { id: payment.proposedRenterId },
-    data: { status: "SCORE_REQUESTED" }
+    data: { status: "SCORE_REQUESTED" },
+    select: { id: true }
   });
 
   await tx.rentScorePayment.update({
@@ -743,7 +752,12 @@ export async function listManualRentScorePayments() {
     },
     include: {
       proposedRenter: {
-        include: {
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          organizationName: true,
+          email: true,
           property: true
         }
       },
@@ -832,7 +846,12 @@ export async function listPendingRentScoreReportApprovals() {
     },
     include: {
       proposedRenter: {
-        include: {
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          organizationName: true,
+          email: true,
           property: true
         }
       },
@@ -924,7 +943,8 @@ export async function approveRentScoreReport(input: {
         where: { id: payment.proposedRenterId },
         data: {
           status: "DECISION_READY"
-        }
+        },
+        select: { id: true }
       });
 
       await tx.proposedRenterActivity.create({
