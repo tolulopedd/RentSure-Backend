@@ -65,6 +65,20 @@ function isMissingPublicAccountNotificationTable(error: unknown) {
   );
 }
 
+function isMissingRentScorePaymentTable(error: unknown) {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "P2021" &&
+    "meta" in error &&
+    typeof error.meta === "object" &&
+    error.meta !== null &&
+    "table" in error.meta &&
+    error.meta.table === "public.RentScorePayment"
+  );
+}
+
 async function getRenterAccount(publicAccountId: string) {
   const account = await prisma.publicAccount.findUnique({
     where: { id: publicAccountId },
@@ -222,14 +236,21 @@ export async function getRenterDashboard(publicAccountId: string) {
       throw error;
     });
 
-  const rentScorePurchasesPromise = prisma.rentScorePayment.findMany({
-    where: {
-      requestedByAccountId: publicAccountId,
-      proposedRenterId: null
-    },
-    orderBy: { createdAt: "desc" },
-    take: 12
-  });
+  const rentScorePurchasesPromise = prisma.rentScorePayment
+    .findMany({
+      where: {
+        requestedByAccountId: publicAccountId,
+        proposedRenterId: null
+      },
+      orderBy: { createdAt: "desc" },
+      take: 12
+    })
+    .catch((error: unknown) => {
+      if (isMissingRentScorePaymentTable(error)) {
+        return [];
+      }
+      throw error;
+    });
 
   const [account, rentScore, linkedCases, shareHistory, notifications, rentScorePurchases] = await Promise.all([
     getRenterAccount(publicAccountId),
