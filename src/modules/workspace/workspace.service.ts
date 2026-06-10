@@ -114,15 +114,19 @@ async function supportsProposedRenterPropertyUnitColumn() {
   }
 
   if (!proposedRenterPropertyUnitColumnProbe) {
-    proposedRenterPropertyUnitColumnProbe = prisma.proposedRenter
-      .findFirst({
-        select: {
-          propertyUnitId: true
-        }
-      } as any)
-      .then(() => {
-        proposedRenterPropertyUnitColumnSupported = true;
-        return true;
+    proposedRenterPropertyUnitColumnProbe = prisma.$queryRaw<Array<{ exists: boolean }>>`
+      SELECT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'ProposedRenter'
+          AND column_name = 'propertyUnitId'
+      ) AS "exists"
+    `
+      .then((rows) => {
+        const exists = Array.isArray(rows) && rows[0]?.exists === true;
+        proposedRenterPropertyUnitColumnSupported = exists;
+        return exists;
       })
       .catch((error: unknown) => {
         if (isMissingProposedRenterPropertyUnitColumn(error)) {
