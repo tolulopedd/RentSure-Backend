@@ -571,13 +571,15 @@ export async function confirmRenterPayment(input: {
     where: {
       id: input.paymentScheduleId,
       proposedRenter: {
-        renterAccountId: input.publicAccountId
+        renterAccountId: input.publicAccountId,
+        decision: "APPROVED",
+        propertyUnitId: { not: null }
       }
     }
   });
 
   if (!schedule) {
-    throw new AppError("Payment schedule not found", 404, "PAYMENT_SCHEDULE_NOT_FOUND");
+    throw new AppError("Approved linked property unit payment schedule not found", 404, "PAYMENT_SCHEDULE_NOT_FOUND");
   }
 
   const now = input.paidAt ?? new Date();
@@ -627,13 +629,15 @@ export async function initiateRenterPaymentConfirmation(input: {
     where: {
       id: input.paymentScheduleId,
       proposedRenter: {
-        renterAccountId: input.publicAccountId
+        renterAccountId: input.publicAccountId,
+        decision: "APPROVED",
+        propertyUnitId: { not: null }
       }
     }
   });
 
   if (!schedule) {
-    throw new AppError("Payment schedule not found", 404, "PAYMENT_SCHEDULE_NOT_FOUND");
+    throw new AppError("Approved linked property unit payment schedule not found", 404, "PAYMENT_SCHEDULE_NOT_FOUND");
   }
 
   if (!input.paymentEvidenceObjectKey && !schedule.paymentEvidenceObjectKey) {
@@ -693,11 +697,13 @@ export async function createSelfInitiatedRenterPayment(input: {
     where: {
       id: input.linkedCaseId,
       renterAccountId: input.publicAccountId,
-      decision: { not: "DECLINED" }
+      decision: "APPROVED",
+      propertyUnitId: { not: null }
     },
     select: {
       id: true,
       propertyId: true,
+      propertyUnitId: true,
       property: {
         select: {
           id: true,
@@ -711,7 +717,7 @@ export async function createSelfInitiatedRenterPayment(input: {
   });
 
   if (!linkedCase) {
-    throw new AppError("Linked property not found for this renter", 404, "LINKED_PROPERTY_NOT_FOUND");
+    throw new AppError("Approved linked property unit not found for this renter", 404, "LINKED_PROPERTY_NOT_FOUND");
   }
 
   const paidAt = input.paidAt ?? new Date();
