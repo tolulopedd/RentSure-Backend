@@ -8,6 +8,7 @@ import { env } from "../../config/env";
 import { AppError } from "../../common/errors/AppError";
 import { logger } from "../../common/logger/logger";
 import { ensureRegistrationRentScoreEvent } from "../rent-score/rent-score.service";
+import { renderTransactionalEmail } from "../mail/mail-templates";
 import { sendTransactionalMail } from "../mail/mail.service";
 
 type AccountScope = "STAFF" | "PUBLIC";
@@ -168,23 +169,19 @@ function buildPasswordResetUrl(rawToken: string) {
 
 async function sendVerificationLink(email: string, verificationUrl: string) {
   const subject = "Verify your email and finish your RentSure signup";
-  const html = `
-      <div style="font-family: Arial, sans-serif; color: #0f172a;">
-        <p style="font-size: 14px; color: #475569;">Hello,</p>
-        <p style="font-size: 14px; line-height: 1.7; color: #334155;">
-          Your RentSure signup has started successfully. Use the button below to verify your email and set your password.
-        </p>
-        <p style="margin: 28px 0;">
-          <a href="${verificationUrl}" style="display: inline-block; border-radius: 12px; background: #1d4ed8; color: white; padding: 12px 18px; text-decoration: none; font-weight: 600;">
-            Verify email and continue
-          </a>
-        </p>
-        <p style="font-size: 13px; line-height: 1.7; color: #475569;">
-          If the button does not work, use this link:<br />
-          <a href="${verificationUrl}" style="color: #1d4ed8;">${verificationUrl}</a>
-        </p>
-      </div>
-    `;
+  const html = renderTransactionalEmail({
+    eyebrow: "Email Verification",
+    title: "Verify your email",
+    greeting: "Hello,",
+    paragraphs: [
+      "Your RentSure signup has started successfully.",
+      "Use the button below to verify your email and set your password."
+    ],
+    ctaLabel: "Verify email and continue",
+    ctaUrl: verificationUrl,
+    helperText: "If the button does not work, use this link:",
+    helperUrl: verificationUrl
+  });
   const delivery = await sendTransactionalMail({
     category: "EMAIL_VERIFICATION",
     to: email,
@@ -196,7 +193,6 @@ async function sendVerificationLink(email: string, verificationUrl: string) {
     {
       event: "auth.email_verification",
       email,
-      verificationUrl,
       previewUrl: delivery.previewUrl || null,
       deliveryMode: delivery.deliveryMode
     },
@@ -208,23 +204,16 @@ async function sendVerificationLink(email: string, verificationUrl: string) {
 
 async function sendPasswordResetLink(email: string, resetUrl: string) {
   const subject = "Reset your RentSure password";
-  const html = `
-      <div style="font-family: Arial, sans-serif; color: #0f172a;">
-        <p style="font-size: 14px; color: #475569;">Hello,</p>
-        <p style="font-size: 14px; line-height: 1.7; color: #334155;">
-          We received a request to reset the password for your RentSure account.
-        </p>
-        <p style="margin: 28px 0;">
-          <a href="${resetUrl}" style="display: inline-block; border-radius: 12px; background: #1d4ed8; color: white; padding: 12px 18px; text-decoration: none; font-weight: 600;">
-            Reset password
-          </a>
-        </p>
-        <p style="font-size: 13px; line-height: 1.7; color: #475569;">
-          If the button does not work, use this link:<br />
-          <a href="${resetUrl}" style="color: #1d4ed8;">${resetUrl}</a>
-        </p>
-      </div>
-    `;
+  const html = renderTransactionalEmail({
+    eyebrow: "Password Reset",
+    title: "Reset your password",
+    greeting: "Hello,",
+    paragraphs: ["We received a request to reset the password for your RentSure account."],
+    ctaLabel: "Reset password",
+    ctaUrl: resetUrl,
+    helperText: "If the button does not work, use this link:",
+    helperUrl: resetUrl
+  });
 
   const delivery = await sendTransactionalMail({
     category: "PASSWORD_RESET",
@@ -237,7 +226,6 @@ async function sendPasswordResetLink(email: string, resetUrl: string) {
     {
       event: "auth.password_reset_email",
       email,
-      resetUrl,
       previewUrl: delivery.previewUrl || null,
       deliveryMode: delivery.deliveryMode
     },
@@ -491,8 +479,7 @@ export async function requestPasswordReset(emailInput: string) {
     {
       event: "auth.password_reset_requested",
       email,
-      previewUrl,
-      resetUrl
+      previewUrl
     },
     "Password reset request captured"
   );

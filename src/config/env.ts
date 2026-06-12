@@ -8,6 +8,14 @@ function requireEnv(name: string): string {
   return value;
 }
 
+function isLocalhostUrl(value: string) {
+  return /:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?(?:\/|$)/i.test(value);
+}
+
+function isBlank(value: string) {
+  return !value.trim();
+}
+
 export const env = {
   PORT: Number(process.env.PORT ?? 4100),
   DATABASE_URL: requireEnv("DATABASE_URL"),
@@ -44,3 +52,29 @@ export const env = {
   PAYSTACK_SECRET_KEY: process.env.PAYSTACK_SECRET_KEY ?? "",
   FLUTTERWAVE_SECRET_KEY: process.env.FLUTTERWAVE_SECRET_KEY ?? ""
 };
+
+if (process.env.NODE_ENV === "production") {
+  if (isLocalhostUrl(env.APP_WEB_BASE_URL)) {
+    throw new Error("APP_WEB_BASE_URL cannot point to localhost in production");
+  }
+
+  if (env.APP_API_BASE_URL && isLocalhostUrl(env.APP_API_BASE_URL)) {
+    throw new Error("APP_API_BASE_URL cannot point to localhost in production");
+  }
+
+  const manualTransferValues = [
+    env.RENT_SCORE_MANUAL_BANK_NAME,
+    env.RENT_SCORE_MANUAL_ACCOUNT_NAME,
+    env.RENT_SCORE_MANUAL_ACCOUNT_NUMBER
+  ];
+  const hasAnyManualTransferConfig = manualTransferValues.some((value) => !isBlank(value));
+  const hasCompleteManualTransferConfig = manualTransferValues.every((value) => !isBlank(value));
+
+  if (hasAnyManualTransferConfig && !hasCompleteManualTransferConfig) {
+    throw new Error("Manual transfer config is incomplete in production");
+  }
+
+  if (!env.PAYSTACK_SECRET_KEY && !env.FLUTTERWAVE_SECRET_KEY && !hasCompleteManualTransferConfig) {
+    throw new Error("At least one rent score payment provider must be configured in production");
+  }
+}

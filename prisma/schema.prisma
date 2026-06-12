@@ -59,6 +59,7 @@ enum ProposedRenterActivityType {
   COMMENT
   CREATED
   SCORE_REQUESTED
+  SCORE_REQUEST_ACCEPTED
   SCORE_FORWARDED
   DECISION
   PAYMENT_SCHEDULE_CREATED
@@ -508,6 +509,7 @@ model ScoreRequest {
   forwardedToAccountId String?
   status              ScoreRequestStatus @default(REQUESTED)
   notes               String?
+  acceptedAt          DateTime?
   createdAt           DateTime           @default(now())
   updatedAt           DateTime           @updatedAt
   forwardedAt         DateTime?

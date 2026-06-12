@@ -18,6 +18,7 @@ import {
   listWorkspaceQueue,
   requestWorkspaceRentScore,
   saveWorkspacePassportPhoto,
+  searchWorkspaceAgents,
   searchWorkspaceRenters,
   shareWorkspaceProperty,
   updateWorkspaceProperty,
@@ -264,6 +265,23 @@ router.post("/workspace/properties/:propertyId/share", async (req, res, next) =>
     res.json(result);
   } catch (error) {
     next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid share request", 400, "VALIDATION_ERROR") : error);
+  }
+});
+
+router.get("/workspace/agent-search", async (req, res, next) => {
+  try {
+    const query = z
+      .object({
+        q: z.string().trim().min(2)
+      })
+      .parse(req.query);
+    const result = await searchWorkspaceAgents({
+      publicAccountId: req.user!.userId,
+      q: query.q
+    });
+    res.json(result);
+  } catch (error) {
+    next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid agent search", 400, "VALIDATION_ERROR") : error);
   }
 });
 

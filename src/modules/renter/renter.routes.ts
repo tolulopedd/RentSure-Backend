@@ -4,6 +4,7 @@ import { AppError } from "../../common/errors/AppError";
 import { requireAuth } from "../../middleware/auth.middleware";
 import { requirePublicRole } from "../../middleware/public-role.middleware";
 import {
+  acceptRenterScoreRequest,
   createSelfInitiatedRenterPayment,
   confirmRenterPayment,
   getRenterDashboard,
@@ -202,11 +203,25 @@ router.post("/renter/payment-schedules/initiate-self", async (req, res, next) =>
   }
 });
 
+router.post("/renter/linked-cases/:linkedCaseId/accept-score-request", async (req, res, next) => {
+  try {
+    const params = z.object({ linkedCaseId: z.string().uuid() }).parse(req.params);
+    const result = await acceptRenterScoreRequest({
+      publicAccountId: req.user!.userId,
+      linkedCaseId: params.linkedCaseId
+    });
+    res.json(result);
+  } catch (error) {
+    next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid score request acceptance", 400, "VALIDATION_ERROR") : error);
+  }
+});
+
 router.post("/renter/share-report", async (req, res, next) => {
   try {
-    const body = shareReportSchema.parse(req.body);
+    const body = shareReportSchema.extend({ linkedCaseId: z.string().uuid().optional() }).parse(req.body);
     const result = await shareRenterScoreReport({
       publicAccountId: req.user!.userId,
+      linkedCaseId: body.linkedCaseId,
       recipientEmail: body.recipientEmail,
       recipientType: body.recipientType,
       recipientFirstName: body.recipientFirstName,

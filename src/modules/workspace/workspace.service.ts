@@ -62,6 +62,60 @@ function propertyUnitSummary(unit?: {
   return parts.join(" · ");
 }
 
+function normalizeComparableValue(value?: string | null) {
+  return value?.trim().toLowerCase() || "";
+}
+
+function inferLegacyPropertyUnit(proposedRenter: {
+  firstName?: string | null;
+  lastName?: string | null;
+  organizationName?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  propertyUnit?: any;
+  property?: {
+    units?: Array<{
+      id: string;
+      label: string;
+      address: string;
+      city: string;
+      state: string;
+      bedroomCount: number;
+      bathroomCount: number;
+      isOccupied: boolean;
+      currentTenantName?: string | null;
+      currentTenantEmail?: string | null;
+      currentTenantPhone?: string | null;
+    }>;
+  } | null;
+}) {
+  if (proposedRenter.propertyUnit) return proposedRenter.propertyUnit;
+
+  const units = proposedRenter.property?.units || [];
+  if (!units.length) return null;
+  if (units.length === 1) return units[0];
+
+  const renterEmail = normalizeComparableValue(proposedRenter.email);
+  const renterPhone = normalizeComparableValue(proposedRenter.phone);
+  const renterName = normalizeComparableValue(
+    proposedRenter.organizationName || [proposedRenter.firstName, proposedRenter.lastName].filter(Boolean).join(" ")
+  );
+
+  const exactMatch = units.find((unit) => {
+    const unitEmail = normalizeComparableValue(unit.currentTenantEmail);
+    const unitPhone = normalizeComparableValue(unit.currentTenantPhone);
+    const unitName = normalizeComparableValue(unit.currentTenantName);
+    return (renterEmail && unitEmail === renterEmail) || (renterPhone && unitPhone === renterPhone) || (renterName && unitName === renterName);
+  });
+
+  if (exactMatch) return exactMatch;
+
+  const occupiedUnits = units.filter((unit) => unit.isOccupied);
+  if (occupiedUnits.length === 1) return occupiedUnits[0];
+
+  return null;
+}
+
 function addDateByFrequency(date: Date, frequency: "MONTHLY" | "QUARTERLY" | "YEARLY", step = 1) {
   const next = new Date(date);
   if (frequency === "MONTHLY") {
@@ -1112,6 +1166,44 @@ export async function shareWorkspaceProperty(input: {
   });
 }
 
+export async function searchWorkspaceAgents(input: {
+  publicAccountId: string;
+  q: string;
+}) {
+  const currentAccount = await getWorkspaceAccount(input.publicAccountId);
+  if (currentAccount.accountType !== "LANDLORD") {
+    throw new AppError("Only landlord accounts can search for agents", 403, "FORBIDDEN");
+  }
+
+  const query = input.q.trim();
+  if (query.length < 2) {
+    return { items: [] };
+  }
+
+  const accounts = await prisma.publicAccount.findMany({
+    where: {
+      accountType: "AGENT",
+      status: "ACTIVE",
+      OR: [
+        { email: { contains: query, mode: "insensitive" } },
+        { firstName: { contains: query, mode: "insensitive" } },
+        { lastName: { contains: query, mode: "insensitive" } },
+        { organizationName: { contains: query, mode: "insensitive" } }
+      ]
+    },
+    orderBy: [{ updatedAt: "desc" }],
+    take: 8
+  });
+
+  return {
+    items: accounts.map((account) => ({
+      id: account.id,
+      name: publicAccountDisplayName(account),
+      email: account.email
+    }))
+  };
+}
+
 export async function listWorkspaceQueue(publicAccountId: string) {
   const account = await getWorkspaceAccount(publicAccountId);
   const canViewRentScore = account.accountType === "LANDLORD";
@@ -1136,6 +1228,9 @@ export async function listWorkspaceQueue(publicAccountId: string) {
               include: {
                 account: true
               }
+            },
+            units: {
+              orderBy: { createdAt: "asc" }
             }
           }
         },
@@ -1188,6 +1283,9 @@ export async function listWorkspaceQueue(publicAccountId: string) {
                   include: {
                     account: true
                   }
+                },
+                units: {
+                  orderBy: { createdAt: "asc" }
                 }
               }
             },
@@ -1215,7 +1313,8 @@ export async function listWorkspaceQueue(publicAccountId: string) {
 
   return {
     items: await Promise.all(
-      items.map(async (item) => {
+    items.map(async (item) => {
+        const resolvedPropertyUnit = inferLegacyPropertyUnit(item);
         const latestScoreRequest = item.scoreRequests[0] || null;
         return {
           id: item.id,
@@ -1406,6 +1505,7 @@ export async function getWorkspaceQueueItem(publicAccountId: string, proposedRen
   ]);
 
   const latestScoreRequest = scoreRequests[0] || null;
+  const resolvedPropertyUnit = inferLegacyPropertyUnit(item);
   const canViewRentScore = account.accountType === "LANDLORD";
   const [linkedRentScore, linkedRentScoreReport] = await Promise.all([
     canViewRentScore ? mapLinkedRentScore(item.renterAccountId) : Promise.resolve(null),
@@ -1473,22 +1573,22 @@ export async function getWorkspaceQueueItem(publicAccountId: string, proposedRen
         currentTenantPhone: unit.currentTenantPhone
       }))
     },
-    propertyUnit: item.propertyUnit
-      ? {
-          id: item.propertyUnit.id,
-          label: item.propertyUnit.label,
-          summaryLabel: propertyUnitSummary(item.propertyUnit),
-          address: item.propertyUnit.address,
-          city: item.propertyUnit.city,
-          state: item.propertyUnit.state,
-          bedroomCount: item.propertyUnit.bedroomCount,
-          bathroomCount: item.propertyUnit.bathroomCount,
-          isOccupied: item.propertyUnit.isOccupied,
-          currentTenantName: item.propertyUnit.currentTenantName,
-          currentTenantEmail: item.propertyUnit.currentTenantEmail,
-          currentTenantPhone: item.propertyUnit.currentTenantPhone
-        }
-      : null,
+          propertyUnit: resolvedPropertyUnit
+            ? {
+                id: resolvedPropertyUnit.id,
+                label: resolvedPropertyUnit.label,
+                summaryLabel: propertyUnitSummary(resolvedPropertyUnit),
+                address: resolvedPropertyUnit.address,
+                city: resolvedPropertyUnit.city,
+                state: resolvedPropertyUnit.state,
+                bedroomCount: resolvedPropertyUnit.bedroomCount,
+                bathroomCount: resolvedPropertyUnit.bathroomCount,
+                isOccupied: resolvedPropertyUnit.isOccupied,
+                currentTenantName: resolvedPropertyUnit.currentTenantName,
+                currentTenantEmail: resolvedPropertyUnit.currentTenantEmail,
+                currentTenantPhone: resolvedPropertyUnit.currentTenantPhone
+              }
+            : null,
     scoreRequests: scoreRequests.map((request) => ({
       id: request.id,
       status: request.status,

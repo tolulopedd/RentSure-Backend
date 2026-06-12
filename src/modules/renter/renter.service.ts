@@ -105,6 +105,7 @@ function getLinkedRenterCases(publicAccountId: string) {
       where: { renterAccountId: publicAccountId },
       include: {
         property: true,
+        propertyUnit: true,
         scoreRequests: {
           include: {
             requestedBy: true,
@@ -138,6 +139,7 @@ function getLinkedRenterCases(publicAccountId: string) {
             decision: true,
             decisionNote: true,
             property: true,
+            propertyUnit: true,
             scoreRequests: {
               include: {
                 requestedBy: true,
@@ -189,6 +191,7 @@ async function logRenterActivity(input: {
     | "COMMENT"
     | "CREATED"
     | "SCORE_REQUESTED"
+    | "SCORE_REQUEST_ACCEPTED"
     | "SCORE_FORWARDED"
     | "DECISION"
     | "PAYMENT_SCHEDULE_CREATED"
@@ -267,6 +270,40 @@ function buildRenterScoreSharePayload(input: {
       propertyState: item.property.state
     }))
   } satisfies Prisma.JsonObject;
+}
+
+function resolveScoreRequestShareRecipient(request: {
+  requestedBy: {
+    accountType: "LANDLORD" | "AGENT" | "RENTER";
+    email: string;
+    firstName: string;
+    lastName: string;
+    organizationName?: string | null;
+    phone: string;
+  };
+  forwardedTo: {
+    accountType: "LANDLORD" | "AGENT" | "RENTER";
+    email: string;
+    firstName: string;
+    lastName: string;
+    organizationName?: string | null;
+    phone: string;
+  } | null;
+}) {
+  const target = request.forwardedTo || request.requestedBy;
+  if (target.accountType !== "LANDLORD" && target.accountType !== "AGENT") {
+    throw new AppError("This score request is not tied to a landlord or agent recipient", 400, "VALIDATION_ERROR");
+  }
+
+  return {
+    email: target.email,
+    type: target.accountType,
+    firstName: target.firstName,
+    lastName: target.lastName,
+    organizationName: target.organizationName,
+    phone: target.phone,
+    name: publicAccountDisplayName(target)
+  } as const;
 }
 
 export async function getRenterDashboard(publicAccountId: string) {
@@ -447,11 +484,38 @@ export async function getRenterDashboard(publicAccountId: string) {
         city: item.property.city,
         state: item.property.state
       },
+      propertyUnit: item.propertyUnit
+        ? {
+            id: item.propertyUnit.id,
+            label: item.propertyUnit.label,
+            summaryLabel: [item.propertyUnit.label, item.propertyUnit.bedroomCount ? `${item.propertyUnit.bedroomCount} bed` : null, item.propertyUnit.bathroomCount ? `${item.propertyUnit.bathroomCount} bath` : null]
+              .filter(Boolean)
+              .join(" · "),
+            address: item.propertyUnit.address,
+            city: item.propertyUnit.city,
+            state: item.propertyUnit.state,
+            bedroomCount: item.propertyUnit.bedroomCount,
+            bathroomCount: item.propertyUnit.bathroomCount,
+            isOccupied: item.propertyUnit.isOccupied,
+            currentTenantName: item.propertyUnit.currentTenantName,
+            currentTenantEmail: item.propertyUnit.currentTenantEmail,
+            currentTenantPhone: item.propertyUnit.currentTenantPhone
+          }
+        : null,
       scoreRequests: item.scoreRequests.map((request) => ({
         id: request.id,
         status: request.status,
+        acceptedAt: "acceptedAt" in request ? request.acceptedAt : null,
         requestedBy: publicAccountDisplayName(request.requestedBy),
+        requestedByEmail: request.requestedBy.email,
+        requestedByType: request.requestedBy.accountType,
         forwardedTo: request.forwardedTo ? publicAccountDisplayName(request.forwardedTo) : null,
+        forwardedToEmail: request.forwardedTo?.email || null,
+        forwardedToType: request.forwardedTo?.accountType || null,
+        shareTarget: resolveScoreRequestShareRecipient({
+          requestedBy: request.requestedBy,
+          forwardedTo: request.forwardedTo
+        }),
         createdAt: request.createdAt
       })),
       paymentSchedules: item.paymentSchedules.map((schedule) => ({
@@ -763,8 +827,73 @@ export async function createSelfInitiatedRenterPayment(input: {
   return getRenterDashboard(input.publicAccountId);
 }
 
+export async function acceptRenterScoreRequest(input: { publicAccountId: string; linkedCaseId: string }) {
+  await getRenterAccount(input.publicAccountId);
+
+  const linkedCase = await prisma.proposedRenter.findFirst({
+    where: {
+      id: input.linkedCaseId,
+      renterAccountId: input.publicAccountId
+    },
+    include: {
+      scoreRequests: {
+        include: {
+          requestedBy: true,
+          forwardedTo: true
+        },
+        orderBy: { createdAt: "desc" }
+      }
+    }
+  });
+
+  if (!linkedCase) {
+    throw new AppError("Linked landlord request was not found", 404, "NOT_FOUND");
+  }
+
+  const latestRequest = linkedCase.scoreRequests[0] || null;
+  if (!latestRequest) {
+    throw new AppError("No rent score request is waiting on this linked property", 400, "VALIDATION_ERROR");
+  }
+
+  if (latestRequest.acceptedAt) {
+    return getRenterDashboard(input.publicAccountId);
+  }
+
+  const acceptedAt = new Date();
+
+  await prisma.$transaction(async (tx) => {
+    await tx.scoreRequest.update({
+      where: { id: latestRequest.id },
+      data: { acceptedAt }
+    });
+
+    const recipient = resolveScoreRequestShareRecipient({
+      requestedBy: latestRequest.requestedBy,
+      forwardedTo: latestRequest.forwardedTo
+    });
+
+    await tx.proposedRenterActivity.create({
+      data: {
+        proposedRenterId: linkedCase.id,
+        actorAccountId: input.publicAccountId,
+        activityType: "SCORE_REQUEST_ACCEPTED",
+        message: `Renter accepted the rent score request for ${recipient.name}.`,
+        metadata: {
+          scoreRequestId: latestRequest.id,
+          recipientEmail: recipient.email,
+          recipientType: recipient.type,
+          acceptedAt: acceptedAt.toISOString()
+        } satisfies Prisma.JsonObject
+      }
+    });
+  });
+
+  return getRenterDashboard(input.publicAccountId);
+}
+
 export async function shareRenterScoreReport(input: {
   publicAccountId: string;
+  linkedCaseId?: string;
   recipientEmail: string;
   recipientType: "LANDLORD" | "AGENT";
   recipientFirstName?: string;
@@ -773,7 +902,52 @@ export async function shareRenterScoreReport(input: {
   note?: string;
 }) {
   const account = await getRenterAccount(input.publicAccountId);
-  const recipientEmail = normalizeEmail(input.recipientEmail);
+  let recipientEmail = normalizeEmail(input.recipientEmail);
+  let recipientType = input.recipientType;
+  let recipientFirstName = input.recipientFirstName?.trim() || undefined;
+  let recipientLastName = input.recipientLastName?.trim() || undefined;
+  let recipientPhone = input.recipientPhone?.trim() || undefined;
+  let linkedCaseId = input.linkedCaseId;
+
+  if (linkedCaseId) {
+    const linkedCase = await prisma.proposedRenter.findFirst({
+      where: {
+        id: linkedCaseId,
+        renterAccountId: input.publicAccountId
+      },
+      include: {
+        scoreRequests: {
+          include: {
+            requestedBy: true,
+            forwardedTo: true
+          },
+          orderBy: { createdAt: "desc" }
+        }
+      }
+    });
+
+    if (!linkedCase) {
+      throw new AppError("Linked landlord request was not found", 404, "NOT_FOUND");
+    }
+
+    const latestRequest = linkedCase.scoreRequests[0] || null;
+    if (!latestRequest) {
+      throw new AppError("No rent score request is available for this linked property", 400, "VALIDATION_ERROR");
+    }
+    if (!latestRequest.acceptedAt) {
+      throw new AppError("Accept the landlord request before sharing your rent score", 400, "VALIDATION_ERROR");
+    }
+
+    const recipient = resolveScoreRequestShareRecipient({
+      requestedBy: latestRequest.requestedBy,
+      forwardedTo: latestRequest.forwardedTo
+    });
+    recipientEmail = normalizeEmail(recipient.email);
+    recipientType = recipient.type;
+    recipientFirstName = recipient.firstName;
+    recipientLastName = recipient.lastName;
+    recipientPhone = recipient.phone;
+  }
 
   if (recipientEmail === normalizeEmail(account.email)) {
     throw new AppError("Use a landlord or agent email to share this report", 400, "VALIDATION_ERROR");
@@ -783,9 +957,10 @@ export async function shareRenterScoreReport(input: {
     where: { email: recipientEmail }
   });
 
-  if (recipientAccount && recipientAccount.accountType !== input.recipientType) {
+  if (recipientAccount && recipientAccount.accountType !== recipientType) {
+    const expectedType = linkedCaseId ? recipientType : input.recipientType;
     throw new AppError(
-      `This email already belongs to a ${recipientAccount.accountType.toLowerCase()} account, not ${input.recipientType.toLowerCase()}.`,
+      `This email already belongs to a ${recipientAccount.accountType.toLowerCase()} account, not ${expectedType.toLowerCase()}.`,
       400,
       "VALIDATION_ERROR"
     );
@@ -817,11 +992,11 @@ export async function shareRenterScoreReport(input: {
       data: {
         publicAccountId: account.id,
         recipientEmail,
-        recipientType: input.recipientType,
+        recipientType,
         recipientAccountId: recipientAccount?.id,
-        recipientFirstName: recipientAccount ? recipientAccount.firstName : input.recipientFirstName?.trim() || null,
-        recipientLastName: recipientAccount ? recipientAccount.lastName : input.recipientLastName?.trim() || null,
-        recipientPhone: recipientAccount ? recipientAccount.phone : input.recipientPhone?.trim() || null,
+        recipientFirstName: recipientAccount ? recipientAccount.firstName : recipientFirstName || null,
+        recipientLastName: recipientAccount ? recipientAccount.lastName : recipientLastName || null,
+        recipientPhone: recipientAccount ? recipientAccount.phone : recipientPhone || null,
         note: input.note?.trim() || null,
         score: rentScore.summary.score,
         maxScore: rentScore.summary.maxScore,
@@ -856,7 +1031,7 @@ export async function shareRenterScoreReport(input: {
         data: {
           publicAccountId: account.id,
           recipientEmail,
-          recipientType: input.recipientType,
+          recipientType,
           recipientAccountId: recipientAccount?.id,
           note: input.note?.trim() || null,
           score: rentScore.summary.score,
@@ -902,6 +1077,60 @@ export async function shareRenterScoreReport(input: {
       };
     }
     throw error;
+  }
+
+  if (linkedCaseId) {
+    const sharedAt = new Date();
+    await prisma.$transaction(async (tx) => {
+      const linkedCase = await tx.proposedRenter.findFirst({
+        where: {
+          id: linkedCaseId,
+          renterAccountId: input.publicAccountId
+        },
+        include: {
+          scoreRequests: {
+            include: {
+              requestedBy: true,
+              forwardedTo: true
+            },
+            orderBy: { createdAt: "desc" }
+          }
+        }
+      });
+
+      if (!linkedCase) return;
+
+      if (linkedCase.status === "SCORE_REQUESTED" || linkedCase.status === "PROPOSED") {
+        await tx.proposedRenter.update({
+          where: { id: linkedCase.id },
+          data: { status: "SCORE_SHARED" }
+        });
+      }
+
+      const latestRequest = linkedCase.scoreRequests[0] || null;
+      const recipient = latestRequest
+        ? resolveScoreRequestShareRecipient({
+            requestedBy: latestRequest.requestedBy,
+            forwardedTo: latestRequest.forwardedTo
+          })
+        : null;
+
+      await tx.proposedRenterActivity.create({
+        data: {
+          proposedRenterId: linkedCase.id,
+          actorAccountId: input.publicAccountId,
+          activityType: "SCORE_FORWARDED",
+          message: recipient
+            ? `Renter shared the rent score report with ${recipient.name}.`
+            : "Renter shared the rent score report.",
+          metadata: {
+            recipientEmail,
+            recipientType,
+            sharedAt: sharedAt.toISOString()
+          } satisfies Prisma.JsonObject
+        }
+      });
+    });
   }
 
   const scorePanel = renderInfoPanel({

@@ -27,6 +27,19 @@ export async function sendTransactionalMail(input: {
   });
 
   if (!hasResendConfig()) {
+    if (process.env.NODE_ENV === "production") {
+      logger.error(
+        {
+          event: "mail.resend_not_configured",
+          category: input.category,
+          to: input.to
+        },
+        "Transactional email cannot be sent because Resend is not configured"
+      );
+
+      throw new Error("Email delivery is not configured right now. Please try again later.");
+    }
+
     logger.info(
       {
         event: "mail.preview_only",
@@ -43,21 +56,42 @@ export async function sendTransactionalMail(input: {
     };
   }
 
-  const response = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${env.RESEND_API_KEY}`,
-      "User-Agent": "rentsure-backend/1.0"
-    },
-    body: JSON.stringify({
-      from: env.RESEND_FROM_EMAIL,
-      to: [input.to],
-      subject: input.subject,
-      html: input.html,
-      ...(env.RESEND_REPLY_TO ? { reply_to: env.RESEND_REPLY_TO } : {})
-    })
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+
+  let response: Response;
+  try {
+    response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${env.RESEND_API_KEY}`,
+        "User-Agent": "rentsure-backend/1.0"
+      },
+      body: JSON.stringify({
+        from: env.RESEND_FROM_EMAIL,
+        to: [input.to],
+        subject: input.subject,
+        html: input.html,
+        ...(env.RESEND_REPLY_TO ? { reply_to: env.RESEND_REPLY_TO } : {})
+      }),
+      signal: controller.signal
+    });
+  } catch (error) {
+    logger.error(
+      {
+        event: "mail.resend_request_failed",
+        category: input.category,
+        to: input.to,
+        error: error instanceof Error ? error.message : String(error)
+      },
+      "Resend email request failed"
+    );
+
+    throw new Error("Unable to send email right now. Please try again.");
+  } finally {
+    clearTimeout(timeout);
+  }
 
   const raw = await response.text();
   let payload: unknown = null;

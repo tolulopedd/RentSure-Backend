@@ -11,7 +11,8 @@
     "build": "tsc -p tsconfig.json",
     "lint": "tsc --noEmit",
     "prisma:gen": "prisma generate",
-    "prisma:migrate": "prisma migrate dev"
+    "prisma:migrate": "prisma migrate dev",
+    "reset:non-user-data": "ts-node-dev --exit-child --transpile-only src/scripts/reset-non-user-data.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.19.2",

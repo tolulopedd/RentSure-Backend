@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { existsSync } from "fs";
 import fs from "fs/promises";
 import path from "path";
 import type { PublicAccountDocument, PublicDocumentType } from "@prisma/client";
@@ -61,6 +62,12 @@ function appApiBaseUrl() {
 
 function localUploadsRoot() {
   return path.resolve(process.cwd(), "uploads");
+}
+
+function localDocumentExists(objectKey: string) {
+  if (!objectKey.startsWith("local/")) return false;
+  const relativePath = objectKey.slice("local/".length);
+  return existsSync(path.join(localUploadsRoot(), relativePath));
 }
 
 function requireStorageConfig(): StorageConfig {
@@ -326,6 +333,9 @@ export async function attachPassportPhotoToPublicAccount(input: {
 
 export function buildPublicDocumentViewUrl(objectKey: string) {
   if (objectKey.startsWith("local/")) {
+    if (!localDocumentExists(objectKey)) {
+      return null;
+    }
     const relativePath = objectKey.slice("local/".length);
     return `${appApiBaseUrl().replace(/\/+$/, "")}/uploads/${relativePath.split("/").map(encodePathSegment).join("/")}`;
   }
@@ -372,6 +382,10 @@ export async function saveLocalPublicDocumentUpload(input: {
   fileSize: number;
   base64Data: string;
 }) {
+  if (process.env.NODE_ENV === "production") {
+    throw new AppError("Local document uploads are disabled in production. Configure S3 storage to continue.", 503, "STORAGE_NOT_CONFIGURED");
+  }
+
   assertValidDocumentUpload({
     documentType: input.documentType,
     contentType: input.contentType,

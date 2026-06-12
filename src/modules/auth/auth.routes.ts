@@ -24,11 +24,9 @@ const publicAccountTypeSchema = z.enum(["RENTER", "LANDLORD", "AGENT"]);
 const publicEntityTypeSchema = z.enum(["INDIVIDUAL", "COMPANY"]);
 const strongPasswordSchema = z
   .string()
-  .min(8)
+  .min(6, "Password must be at least 6 characters")
   .regex(/[A-Z]/, "Password must include at least one uppercase letter")
-  .regex(/[a-z]/, "Password must include at least one lowercase letter")
-  .regex(/\d/, "Password must include at least one number")
-  .regex(/[^A-Za-z0-9]/, "Password must include at least one special character");
+  .regex(/[a-z]/, "Password must include at least one lowercase letter");
 
 function requireStaffScope(req: Parameters<typeof requireAuth>[0]) {
   if (!req.user || req.user.accountScope !== "STAFF") {
@@ -98,7 +96,7 @@ router.post("/auth/login", async (req, res, next) => {
     const body = z
       .object({
         email: z.string().email(),
-        password: z.string().min(8)
+        password: z.string().min(6)
       })
       .parse(req.body);
 
