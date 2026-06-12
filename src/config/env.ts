@@ -74,7 +74,4 @@ if (process.env.NODE_ENV === "production") {
     throw new Error("Manual transfer config is incomplete in production");
   }
 
-  if (!env.PAYSTACK_SECRET_KEY && !env.FLUTTERWAVE_SECRET_KEY && !hasCompleteManualTransferConfig) {
-    throw new Error("At least one rent score payment provider must be configured in production");
-  }
 }
