@@ -66,6 +66,15 @@ function normalizeComparableValue(value?: string | null) {
   return value?.trim().toLowerCase() || "";
 }
 
+function escapeHtml(value: string) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
 function inferLegacyPropertyUnit(proposedRenter: {
   firstName?: string | null;
   lastName?: string | null;
@@ -137,6 +146,80 @@ function resolvePaymentTiming(dueDate: Date, paidAt: Date): PaymentTiming {
 function buildRenterInviteUrl(email: string) {
   const base = env.APP_WEB_BASE_URL.replace(/\/+$/, "");
   return `${base}/signup?track=RENTER&email=${encodeURIComponent(email)}`;
+}
+
+function buildAppUrl(path: string) {
+  const base = env.APP_WEB_BASE_URL.replace(/\/+$/, "");
+  return `${base}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+function formatPropertyAddress(input: { address?: string | null; city?: string | null; state?: string | null }) {
+  return [input.address, input.city, input.state].filter(Boolean).join(", ");
+}
+
+async function notifyRenterOfDecision(input: {
+  decision: ProposedRenterDecision;
+  renterEmail: string;
+  renterName: string;
+  propertyAddress: string;
+  note?: string | null;
+}) {
+  const greetingName = input.renterName || "there";
+  const openAccountUrl = buildAppUrl("/account/renter/queue");
+  const trimmedNote = input.note?.trim() || null;
+  const safeNote = trimmedNote ? escapeHtml(trimmedNote) : null;
+
+  const decisionCopy =
+    input.decision === "APPROVED"
+      ? {
+          subject: "Congratulations on Your Rental Application!",
+          eyebrow: "Application Approved",
+          title: "Your rental application has been approved",
+          paragraphs: [
+            `We are pleased to inform you that your rental application for <strong>${input.propertyAddress}</strong> has been approved. Congratulations and welcome to your new home.`,
+            "Please log on to your RentSure account and confirm that you want to proceed with signing the lease agreement.",
+            "If you have any questions or need further information, feel free to reach out."
+          ]
+        }
+      : input.decision === "HOLD"
+        ? {
+            subject: "Additional Information Needed for Your Rental Application",
+            eyebrow: "More Information Requested",
+            title: "The landlord needs a bit more information",
+            paragraphs: [
+              `Your rental application for <strong>${input.propertyAddress}</strong> is still under review.`,
+              "The landlord has requested additional information before making a final decision. Please sign in to your RentSure account and review your application details.",
+              safeNote
+                ? `Additional note from the landlord: <strong>${safeNote}</strong>`
+                : "If you have any extra supporting details to provide, this is the right time to update them."
+            ]
+          }
+        : {
+            subject: "Update on Your Rental Application",
+            eyebrow: "Application Update",
+            title: "Your rental application was not approved",
+            paragraphs: [
+              `Thank you for your interest in the property at <strong>${input.propertyAddress}</strong>.`,
+              "We’re sorry to let you know that your rental application was not approved at this time.",
+              safeNote
+                ? `Landlord note: <strong>${safeNote}</strong>`
+                : "You can still continue improving your profile and rent score in RentSure for future property applications."
+            ]
+          };
+
+  return sendTransactionalMail({
+    category: "RENTER_DECISION",
+    to: input.renterEmail,
+    subject: decisionCopy.subject,
+    html: renderTransactionalEmail({
+      eyebrow: decisionCopy.eyebrow,
+      title: decisionCopy.title,
+      greeting: `Dear ${greetingName},`,
+      paragraphs: decisionCopy.paragraphs,
+      ctaLabel: "Open RentSure account",
+      ctaUrl: openAccountUrl
+    })
+  });
 }
 
 function isMissingProposedRenterPropertyUnitColumn(error: unknown) {
@@ -536,7 +619,7 @@ async function notifyProposedRenter(input: {
 }) {
   const isExistingMember = Boolean(input.existingAccountId);
   const actionPath = isExistingMember ? "/account/renter/queue" : `/signup?track=RENTER&email=${encodeURIComponent(input.renterEmail)}`;
-  const actionUrl = `${env.APP_WEB_BASE_URL.replace(/\/+$/, "")}${actionPath}`;
+  const actionUrl = buildAppUrl(actionPath);
   const linkedByAgent = input.requestedByAccountType === "AGENT";
   const greetingName = input.renterName || "there";
   const existingMemberSubject = "You've Been Linked to a Property!";
@@ -2316,6 +2399,43 @@ export async function decideWorkspaceProposedRenter(input: {
         : ({ decision: input.decision } as Prisma.JsonObject),
       tx
     });
+
+    const renterName =
+      proposedRenter.organizationName || [proposedRenter.firstName, proposedRenter.lastName].filter(Boolean).join(" ") || "there";
+    const resolvedUnit = inferLegacyPropertyUnit(proposedRenter);
+    const propertyAddress = resolvedUnit
+      ? formatPropertyAddress({
+          address: resolvedUnit.address,
+          city: resolvedUnit.city,
+          state: resolvedUnit.state
+        })
+      : formatPropertyAddress({
+          address: proposedRenter.property.address,
+          city: proposedRenter.property.city,
+          state: proposedRenter.property.state
+        });
+
+    if (proposedRenter.email?.trim()) {
+      const delivery = await notifyRenterOfDecision({
+        decision: input.decision,
+        renterEmail: proposedRenter.email.trim(),
+        renterName,
+        propertyAddress,
+        note: input.note
+      });
+
+      logger.info(
+        {
+          event: "workspace.renter_decision_notification",
+          proposedRenterId: proposedRenter.id,
+          renterEmail: proposedRenter.email.trim(),
+          decision: input.decision,
+          previewUrl: delivery.previewUrl || null,
+          deliveryMode: delivery.deliveryMode
+        },
+        "Renter decision notification sent"
+      );
+    }
 
     return getWorkspaceQueueItem(input.publicAccountId, proposedRenter.id, tx);
   });

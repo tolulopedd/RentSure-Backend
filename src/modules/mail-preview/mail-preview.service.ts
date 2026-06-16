@@ -4,6 +4,7 @@ import { env } from "../../config/env";
 type MailPreviewCategory =
   | "EMAIL_VERIFICATION"
   | "RENTER_INVITE"
+  | "RENTER_DECISION"
   | "RENTER_NOTIFICATION"
   | "RENTER_SHARE_REPORT"
   | "PASSWORD_RESET";
@@ -44,6 +45,7 @@ function previewUrl(id: string) {
 function categoryLabel(category: MailPreviewCategory) {
   if (category === "EMAIL_VERIFICATION") return "Email Verification";
   if (category === "RENTER_INVITE") return "Renter Invite";
+  if (category === "RENTER_DECISION") return "Renter Decision";
   if (category === "RENTER_NOTIFICATION") return "Renter Notification";
   if (category === "RENTER_SHARE_REPORT") return "Rent Score Share";
   return "Password Reset";
@@ -64,6 +66,14 @@ function categoryTheme(category: MailPreviewCategory) {
       badgeText: "#6d28d9",
       accent: "#7c3aed",
       tint: "rgba(124,58,237,0.12)"
+    };
+  }
+  if (category === "RENTER_DECISION") {
+    return {
+      badgeBg: "#e0f2fe",
+      badgeText: "#0369a1",
+      accent: "#0284c7",
+      tint: "rgba(2,132,199,0.12)"
     };
   }
   if (category === "RENTER_NOTIFICATION") {

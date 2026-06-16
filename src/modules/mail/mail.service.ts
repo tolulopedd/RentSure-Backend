@@ -5,6 +5,7 @@ import { createMailPreview } from "../mail-preview/mail-preview.service";
 type MailCategory =
   | "EMAIL_VERIFICATION"
   | "RENTER_INVITE"
+  | "RENTER_DECISION"
   | "RENTER_NOTIFICATION"
   | "RENTER_SHARE_REPORT"
   | "PASSWORD_RESET";
