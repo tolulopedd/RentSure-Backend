@@ -1,7 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../../prisma/client";
 import { AppError } from "../../common/errors/AppError";
-import { buildRentScoreSnapshot, ensureSingleRentScoreEvent } from "../rent-score/rent-score.service";
+import { buildRentScoreSnapshot, ensureSingleRentScoreEvent, syncUtilityPaymentHistoryEvent } from "../rent-score/rent-score.service";
 import { attachPassportPhotoToPublicAccount, buildPublicDocumentViewUrl, toPublicDocumentAsset } from "../storage/storage.service";
 import { createMailPreview } from "../mail-preview/mail-preview.service";
 import { renderInfoPanel, renderTransactionalEmail } from "../mail/mail-templates";
@@ -14,6 +14,13 @@ function normalizeEmail(email: string) {
 function publicAccountDisplayName(account: { firstName: string; lastName: string; organizationName?: string | null }) {
   if (account.organizationName?.trim()) return account.organizationName.trim();
   return [account.firstName, account.lastName].filter(Boolean).join(" ");
+}
+
+function rentScoreBandLabel(scoreBand: string) {
+  if (scoreBand === "STRONG") return "Excellent";
+  if (scoreBand === "STABLE") return "Good";
+  if (scoreBand === "WATCH") return "Fair";
+  return "High Risk";
 }
 
 function isMissingRenterScoreShareTable(error: unknown) {
@@ -119,6 +126,12 @@ function getLinkedRenterCases(publicAccountId: string) {
           },
           orderBy: [{ dueDate: "asc" }, { createdAt: "desc" }]
         },
+        landlordReferenceRequests: {
+          include: {
+            landlordAccount: true
+          },
+          orderBy: { createdAt: "desc" }
+        },
         activities: {
           include: {
             actor: true
@@ -152,6 +165,12 @@ function getLinkedRenterCases(publicAccountId: string) {
                 createdBy: true
               },
               orderBy: [{ dueDate: "asc" }, { createdAt: "desc" }]
+            },
+            landlordReferenceRequests: {
+              include: {
+                landlordAccount: true
+              },
+              orderBy: { createdAt: "desc" }
             },
             activities: {
               include: {
@@ -406,6 +425,8 @@ export async function getRenterDashboard(publicAccountId: string) {
       state: account.state,
       city: account.city,
       address: account.address,
+      residenceMoveCount5y: account.residenceMoveCount5y,
+      employerCount5y: account.employerCount5y,
       notes: account.notes,
       nin: null,
       ninVerifiedAt: account.ninVerifiedAt,
@@ -538,6 +559,15 @@ export async function getRenterDashboard(publicAccountId: string) {
         receiptReference: schedule.receiptReference,
         createdBy: publicAccountDisplayName(schedule.createdBy)
       })),
+      landlordReferenceRequests: item.landlordReferenceRequests.map((request) => ({
+        id: request.id,
+        status: request.status,
+        recommendation: request.recommendation,
+        note: request.note,
+        requestedAt: request.requestedAt,
+        respondedAt: request.respondedAt,
+        landlordName: publicAccountDisplayName(request.landlordAccount)
+      })),
       activities: item.activities.map((activity) => ({
         id: activity.id,
         activityType: activity.activityType,
@@ -559,6 +589,8 @@ export async function updateRenterProfile(input: {
   state?: string;
   city?: string;
   address?: string;
+  residenceMoveCount5y?: number | null;
+  employerCount5y?: number | null;
   notes?: string | null;
 }) {
   await getRenterAccount(input.publicAccountId);
@@ -574,6 +606,8 @@ export async function updateRenterProfile(input: {
       state: input.state?.trim(),
       city: input.city?.trim(),
       address: input.address?.trim(),
+      residenceMoveCount5y: input.residenceMoveCount5y === undefined ? undefined : input.residenceMoveCount5y,
+      employerCount5y: input.employerCount5y === undefined ? undefined : input.employerCount5y,
       notes: input.notes === undefined ? undefined : input.notes?.trim() || null
     }
   });
@@ -618,7 +652,7 @@ export async function verifyRenterIdentity(input: {
           }
   });
 
-  await ensureSingleRentScoreEvent(account.id, "BVN_SIN_VALIDATED", `${input.verificationType} verified on RentSure`);
+  await ensureSingleRentScoreEvent(account.id, "GOVERNMENT_ID_VERIFIED", `${input.verificationType} verified on RentSure`);
   return getRenterDashboard(account.id);
 }
 
@@ -673,6 +707,10 @@ export async function confirmRenterPayment(input: {
       timing
     } as Prisma.JsonObject
   });
+
+  if (schedule.paymentType === "UTILITY") {
+    await syncUtilityPaymentHistoryEvent(input.publicAccountId);
+  }
 
   return getRenterDashboard(input.publicAccountId);
 }
@@ -891,6 +929,78 @@ export async function acceptRenterScoreRequest(input: { publicAccountId: string;
   return getRenterDashboard(input.publicAccountId);
 }
 
+export async function requestLandlordReference(input: {
+  publicAccountId: string;
+  linkedCaseId: string;
+  note?: string;
+}) {
+  await getRenterAccount(input.publicAccountId);
+
+  const linkedCase = await prisma.proposedRenter.findFirst({
+    where: {
+      id: input.linkedCaseId,
+      renterAccountId: input.publicAccountId
+    },
+    include: {
+      property: {
+        include: {
+          members: {
+            where: { role: "LANDLORD" },
+            include: { account: true },
+            orderBy: [{ isPrimary: "desc" }, { addedAt: "asc" }]
+          }
+        }
+      }
+    }
+  });
+
+  if (!linkedCase) {
+    throw new AppError("Linked property not found", 404, "LINKED_PROPERTY_NOT_FOUND");
+  }
+
+  const landlordMembership = linkedCase.property.members[0] || null;
+  if (!landlordMembership) {
+    throw new AppError("No landlord is linked to this property yet", 400, "LANDLORD_NOT_FOUND");
+  }
+
+  const existingPending = await prisma.landlordReferenceRequest.findFirst({
+    where: {
+      proposedRenterId: linkedCase.id,
+      renterAccountId: input.publicAccountId,
+      landlordAccountId: landlordMembership.publicAccountId,
+      status: "PENDING"
+    }
+  });
+
+  if (!existingPending) {
+    await prisma.$transaction(async (tx) => {
+      await tx.landlordReferenceRequest.create({
+        data: {
+          proposedRenterId: linkedCase.id,
+          renterAccountId: input.publicAccountId,
+          landlordAccountId: landlordMembership.publicAccountId,
+          note: input.note?.trim() || null
+        }
+      });
+
+      await tx.proposedRenterActivity.create({
+        data: {
+          proposedRenterId: linkedCase.id,
+          actorAccountId: input.publicAccountId,
+          activityType: "COMMENT",
+          message: `Renter requested a landlord reference from ${publicAccountDisplayName(landlordMembership.account)}.`,
+          metadata: {
+            landlordAccountId: landlordMembership.publicAccountId,
+            note: input.note?.trim() || null
+          } satisfies Prisma.JsonObject
+        }
+      });
+    });
+  }
+
+  return getRenterDashboard(input.publicAccountId);
+}
+
 export async function shareRenterScoreReport(input: {
   publicAccountId: string;
   linkedCaseId?: string;
@@ -1057,7 +1167,7 @@ export async function shareRenterScoreReport(input: {
       const scorePanel = renderInfoPanel({
         label: "Rent score",
         value: `${rentScore.summary.score} / ${rentScore.summary.maxScore}`,
-        note: `Band: ${rentScore.summary.scoreBand}`
+        note: `Band: ${rentScoreBandLabel(rentScore.summary.scoreBand)}`
       });
       const legacySharePreview = createMailPreview({
         category: "RENTER_SHARE_REPORT",
@@ -1136,7 +1246,7 @@ export async function shareRenterScoreReport(input: {
   const scorePanel = renderInfoPanel({
     label: "Rent score",
     value: `${rentScore.summary.score} / ${rentScore.summary.maxScore}`,
-    note: `Band: ${rentScore.summary.scoreBand}`
+    note: `Band: ${rentScoreBandLabel(rentScore.summary.scoreBand)}`
   });
   const sharePreview = createMailPreview({
     category: "RENTER_SHARE_REPORT",

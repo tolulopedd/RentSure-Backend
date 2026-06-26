@@ -12,20 +12,18 @@ import {
   resendPendingRenterInvite
 } from "../workspace/workspace.service";
 import {
-  approveRentScoreReport,
-  confirmManualRentScorePayment,
-  listManualRentScorePayments,
-  listPendingRentScoreReportApprovals
-} from "../score-payments/score-payments.service";
-import {
-  createRentScoreRule,
+  createRentScoreOverride,
+  deleteRentScoreCategory,
+  deleteRentScoreOverride,
   deleteRentScoreEvent,
+  deleteRentScoreRule,
   getAuthenticatedRenterScore,
   getRentScoreConfig,
   getRenterScoreDetails,
+  listRentScoreRules,
   listRenterScores,
   recordRentScoreEvent,
-  updateRentScorePolicy,
+  updateRentScoreCategory,
   updateRentScoreRule
 } from "./rent-score.service";
 
@@ -37,43 +35,6 @@ const metadataSchema = z.record(z.string(), z.unknown()).optional();
 function toJsonObject(value?: Record<string, unknown>) {
   return value as Prisma.JsonObject | undefined;
 }
-
-const policyUpdateSchema = z
-  .object({
-    name: z.string().trim().min(2).max(120).optional(),
-    description: z.string().trim().max(400).nullable().optional(),
-    minScore: z.number().int().min(0).max(900).optional(),
-    maxScore: z.number().int().min(0).max(900).optional(),
-    isActive: z.boolean().optional()
-  })
-  .refine((data) => data.minScore === undefined || data.maxScore === undefined || data.minScore < data.maxScore, {
-    message: "minScore must be below maxScore"
-  });
-
-const ruleCreateSchema = z.object({
-  code: z.string().trim().min(2).max(80),
-  name: z.string().trim().min(2).max(120),
-  description: z.string().trim().max(400).nullable().optional(),
-  points: z.number().int().min(-900).max(900).refine((value) => value !== 0, {
-    message: "Rule points cannot be zero"
-  }),
-  maxOccurrences: z.number().int().min(1).max(100).nullable().optional(),
-  isActive: z.boolean().optional(),
-  sortOrder: z.number().int().min(0).max(9999).optional(),
-  metadata: metadataSchema
-});
-
-const ruleUpdateSchema = z.object({
-  name: z.string().trim().min(2).max(120).optional(),
-  description: z.string().trim().max(400).nullable().optional(),
-  points: z.number().int().min(-900).max(900).refine((value) => value !== 0, {
-    message: "Rule points cannot be zero"
-  }).optional(),
-  maxOccurrences: z.number().int().min(1).max(100).nullable().optional(),
-  isActive: z.boolean().optional(),
-  sortOrder: z.number().int().min(0).max(9999).optional(),
-  metadata: metadataSchema
-});
 
 const eventCreateSchema = z
   .object({
@@ -88,54 +49,24 @@ const eventCreateSchema = z
     message: "ruleId or ruleCode is required"
   });
 
+const categoryUpdateSchema = z.object({
+  name: z.string().trim().min(2).max(120).optional(),
+  maxScore: z.number().int().min(0).max(900).optional()
+});
+
+const ruleUpdateSchema = z.object({
+  name: z.string().trim().min(2).max(160).optional(),
+  points: z.number().int().min(-900).max(900).optional()
+});
+
 router.get(
-  "/admin/rent-score/payments/manual",
+  "/admin/rent-score/setup",
   requireAuth,
   requireRole("ADMIN"),
   async (_req, res, next) => {
     try {
-      const result = await listManualRentScorePayments();
+      const result = await getRentScoreConfig();
       res.json(result);
-    } catch (error) {
-      next(error);
-    }
-  }
-);
-
-router.post(
-  "/admin/rent-score/payments/manual/:paymentId/confirm",
-  requireAuth,
-  requireRole("ADMIN"),
-  async (req, res, next) => {
-    try {
-      const params = z.object({ paymentId: z.string().uuid() }).parse(req.params);
-      const result = await confirmManualRentScorePayment({
-        adminUserId: req.user!.userId,
-        paymentId: params.paymentId
-      });
-
-      await writeAuditLog({
-        req,
-        action: "rent_score.payment.manual_confirm",
-        entity: "RentScorePayment",
-        entityId: params.paymentId
-      });
-
-      res.json(result);
-    } catch (error) {
-      next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid manual payment confirmation request", 400, "VALIDATION_ERROR") : error);
-    }
-  }
-);
-
-router.get(
-  "/admin/rent-score/config",
-  requireAuth,
-  requireRole("ADMIN"),
-  async (req, res, next) => {
-    try {
-      const config = await getRentScoreConfig();
-      res.json(config);
     } catch (error) {
       next(error);
     }
@@ -156,45 +87,6 @@ router.get(
   }
 );
 
-router.post(
-  "/admin/rent-score/payments/:paymentId/approve-report",
-  requireAuth,
-  requireRole("ADMIN"),
-  async (req, res, next) => {
-    try {
-      const params = z.object({ paymentId: z.string().uuid() }).parse(req.params);
-      const result = await approveRentScoreReport({
-        adminUserId: req.user!.userId,
-        paymentId: params.paymentId
-      });
-
-      await writeAuditLog({
-        req,
-        action: "rent_score.report.approve",
-        entity: "RentScorePayment",
-        entityId: params.paymentId
-      });
-
-      res.json(result);
-    } catch (error) {
-      next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid approval request", 400, "VALIDATION_ERROR") : error);
-    }
-  }
-);
-
-router.get(
-  "/admin/rent-score/report-approvals",
-  requireAuth,
-  requireRole("ADMIN"),
-  async (_req, res, next) => {
-    try {
-      const result = await listPendingRentScoreReportApprovals();
-      res.json(result);
-    } catch (error) {
-      next(error);
-    }
-  }
-);
 
 router.get(
   "/admin/renter-activities",
@@ -250,68 +142,83 @@ router.post(
   }
 );
 
-router.patch(
-  "/admin/rent-score/config",
-  requireAuth,
-  requireRole("ADMIN"),
-  async (req, res, next) => {
-    try {
-      const body = policyUpdateSchema.parse(req.body);
-      const config = await updateRentScorePolicy(body);
+const overrideCreateSchema = z.object({
+  scope: z.enum(["BREAKDOWN_ITEM", "CATEGORY"]),
+  targetCode: z.string().trim().min(2).max(120),
+  note: z.string().trim().max(500).optional()
+});
 
-      await writeAuditLog({
-        req,
-        action: "rent_score.policy.update",
-        entity: "RentScorePolicy",
-        entityId: config.id,
-        meta: body
-      });
-
-      res.json(config);
-    } catch (error) {
-      next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid payload", 400, "VALIDATION_ERROR") : error);
-    }
-  }
-);
-
-router.post(
+router.get(
   "/admin/rent-score/rules",
   requireAuth,
   requireRole("ADMIN"),
-  async (req, res, next) => {
+  async (_req, res, next) => {
     try {
-      const body = ruleCreateSchema.parse(req.body);
-      const config = await createRentScoreRule({
-        ...body,
-        metadata: toJsonObject(body.metadata)
-      });
-
-      await writeAuditLog({
-        req,
-        action: "rent_score.rule.create",
-        entity: "RentScoreRule",
-        meta: body
-      });
-
-      res.status(201).json(config);
+      const result = await listRentScoreRules();
+      res.json(result);
     } catch (error) {
-      next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid payload", 400, "VALIDATION_ERROR") : error);
+      next(error);
     }
   }
 );
 
 router.patch(
-  "/admin/rent-score/rules/:ruleId",
+  "/admin/rent-score/setup/categories/:categoryId",
+  requireAuth,
+  requireRole("ADMIN"),
+  async (req, res, next) => {
+    try {
+      const params = z.object({ categoryId: z.string().uuid() }).parse(req.params);
+      const body = categoryUpdateSchema.parse(req.body);
+      const result = await updateRentScoreCategory(params.categoryId, body);
+
+      await writeAuditLog({
+        req,
+        action: "rent_score.category.update",
+        entity: "RentScoreCategoryConfig",
+        entityId: params.categoryId,
+        meta: body
+      });
+
+      res.json(result);
+    } catch (error) {
+      next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid category payload", 400, "VALIDATION_ERROR") : error);
+    }
+  }
+);
+
+router.delete(
+  "/admin/rent-score/setup/categories/:categoryId",
+  requireAuth,
+  requireRole("ADMIN"),
+  async (req, res, next) => {
+    try {
+      const params = z.object({ categoryId: z.string().uuid() }).parse(req.params);
+      const result = await deleteRentScoreCategory(params.categoryId);
+
+      await writeAuditLog({
+        req,
+        action: "rent_score.category.delete",
+        entity: "RentScoreCategoryConfig",
+        entityId: params.categoryId
+      });
+
+      res.json(result);
+    } catch (error) {
+      next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid category delete request", 400, "VALIDATION_ERROR") : error);
+    }
+  }
+);
+
+router.patch(
+  "/admin/rent-score/setup/rules/:ruleId",
   requireAuth,
   requireRole("ADMIN"),
   async (req, res, next) => {
     try {
       const params = z.object({ ruleId: z.string().uuid() }).parse(req.params);
       const body = ruleUpdateSchema.parse(req.body);
-      const config = await updateRentScoreRule(params.ruleId, {
-        ...body,
-        metadata: toJsonObject(body.metadata)
-      });
+      const result = await updateRentScoreRule(params.ruleId, body);
 
       await writeAuditLog({
         req,
@@ -321,9 +228,32 @@ router.patch(
         meta: body
       });
 
-      res.json(config);
+      res.json(result);
     } catch (error) {
-      next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid payload", 400, "VALIDATION_ERROR") : error);
+      next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid rule payload", 400, "VALIDATION_ERROR") : error);
+    }
+  }
+);
+
+router.delete(
+  "/admin/rent-score/setup/rules/:ruleId",
+  requireAuth,
+  requireRole("ADMIN"),
+  async (req, res, next) => {
+    try {
+      const params = z.object({ ruleId: z.string().uuid() }).parse(req.params);
+      const result = await deleteRentScoreRule(params.ruleId);
+
+      await writeAuditLog({
+        req,
+        action: "rent_score.rule.delete",
+        entity: "RentScoreRule",
+        entityId: params.ruleId
+      });
+
+      res.json(result);
+    } catch (error) {
+      next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid rule delete request", 400, "VALIDATION_ERROR") : error);
     }
   }
 );
@@ -417,6 +347,60 @@ router.delete(
       res.json(snapshot);
     } catch (error) {
       next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid request", 400, "VALIDATION_ERROR") : error);
+    }
+  }
+);
+
+router.post(
+  "/admin/rent-score/accounts/:publicAccountId/overrides",
+  requireAuth,
+  requireRole("ADMIN"),
+  async (req, res, next) => {
+    try {
+      const params = z.object({ publicAccountId: z.string().uuid() }).parse(req.params);
+      const body = overrideCreateSchema.parse(req.body);
+      const snapshot = await createRentScoreOverride({
+        publicAccountId: params.publicAccountId,
+        scope: body.scope,
+        targetCode: body.targetCode,
+        note: body.note,
+        createdByUserId: req.user?.userId ?? null
+      });
+
+      await writeAuditLog({
+        req,
+        action: "rent_score.override.create",
+        entity: "PublicAccount",
+        entityId: params.publicAccountId,
+        meta: body
+      });
+
+      res.status(201).json(snapshot);
+    } catch (error) {
+      next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid override payload", 400, "VALIDATION_ERROR") : error);
+    }
+  }
+);
+
+router.delete(
+  "/admin/rent-score/overrides/:overrideId",
+  requireAuth,
+  requireRole("ADMIN"),
+  async (req, res, next) => {
+    try {
+      const params = z.object({ overrideId: z.string().uuid() }).parse(req.params);
+      const snapshot = await deleteRentScoreOverride(params.overrideId);
+
+      await writeAuditLog({
+        req,
+        action: "rent_score.override.delete",
+        entity: "RentScoreOverride",
+        entityId: params.overrideId
+      });
+
+      res.json(snapshot);
+    } catch (error) {
+      next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid override request", 400, "VALIDATION_ERROR") : error);
     }
   }
 );

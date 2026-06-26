@@ -17,10 +17,12 @@ import {
   listWorkspaceProperties,
   listWorkspaceQueue,
   requestWorkspaceRentScore,
+  respondToLandlordReferenceRequest,
   saveWorkspacePassportPhoto,
   searchWorkspaceAgents,
   searchWorkspaceRenters,
   shareWorkspaceProperty,
+  submitWorkspaceRenterBehaviourReview,
   updateWorkspaceProperty,
   updateWorkspaceProfile,
   updateWorkspacePaymentSchedule
@@ -43,6 +45,7 @@ const propertySchema = z.object({
     label: z.string().trim().min(1).max(120),
     bedroomCount: z.number().int().min(1).max(100),
     bathroomCount: z.number().int().min(1).max(100),
+    annualRentAmountNgn: z.number().int().positive().optional().nullable(),
     isOccupied: z.boolean().default(false),
     currentTenantName: z.string().trim().max(160).optional(),
     currentTenantEmail: z.string().trim().email().optional().or(z.literal("")),
@@ -142,6 +145,19 @@ const decisionSchema = z.object({
 
 const commentSchema = z.object({
   message: z.string().trim().min(2).max(500)
+});
+
+const behaviourReviewSchema = z.object({
+  rating: z.enum(["EXCELLENT", "GOOD", "FAIR", "POOR"]),
+  damagesReported: z.boolean().optional(),
+  note: z.string().trim().max(500).optional(),
+  complaints: z.array(z.string().trim().min(1).max(120)).max(10).optional()
+});
+
+const landlordReferenceResponseSchema = z.object({
+  recommendation: z.enum(["STRONGLY_RECOMMEND", "RECOMMEND", "NEUTRAL", "DO_NOT_RECOMMEND"]),
+  note: z.string().trim().max(500).optional(),
+  decline: z.boolean().optional()
 });
 
 const updateProfileSchema = z.object({
@@ -411,6 +427,41 @@ router.post("/workspace/queue/:proposedRenterId/comments", async (req, res, next
     res.status(201).json(result);
   } catch (error) {
     next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid comment payload", 400, "VALIDATION_ERROR") : error);
+  }
+});
+
+router.post("/workspace/queue/:proposedRenterId/behaviour-review", async (req, res, next) => {
+  try {
+    const params = z.object({ proposedRenterId: z.string().uuid() }).parse(req.params);
+    const body = behaviourReviewSchema.parse(req.body);
+    const result = await submitWorkspaceRenterBehaviourReview({
+      publicAccountId: req.user!.userId,
+      proposedRenterId: params.proposedRenterId,
+      rating: body.rating,
+      damagesReported: body.damagesReported,
+      note: body.note,
+      complaints: body.complaints
+    });
+    res.json(result);
+  } catch (error) {
+    next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid renter behaviour review", 400, "VALIDATION_ERROR") : error);
+  }
+});
+
+router.post("/workspace/landlord-reference-requests/:requestId/respond", async (req, res, next) => {
+  try {
+    const params = z.object({ requestId: z.string().uuid() }).parse(req.params);
+    const body = landlordReferenceResponseSchema.parse(req.body);
+    const result = await respondToLandlordReferenceRequest({
+      publicAccountId: req.user!.userId,
+      requestId: params.requestId,
+      recommendation: body.recommendation,
+      note: body.note,
+      decline: body.decline
+    });
+    res.json(result);
+  } catch (error) {
+    next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid landlord reference response", 400, "VALIDATION_ERROR") : error);
   }
 });
 

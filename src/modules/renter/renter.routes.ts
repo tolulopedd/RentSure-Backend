@@ -12,6 +12,7 @@ import {
   saveRenterPassportPhoto,
   searchRenterShareRecipients,
   shareRenterScoreReport,
+  requestLandlordReference,
   updateRenterProfile,
   verifyRenterIdentity
 } from "./renter.service";
@@ -31,6 +32,8 @@ const updateProfileSchema = z.object({
   state: z.string().trim().min(2).optional(),
   city: z.string().trim().min(2).optional(),
   address: z.string().trim().min(5).optional(),
+  residenceMoveCount5y: z.number().int().min(1).max(5).optional().nullable(),
+  employerCount5y: z.number().int().min(1).max(20).optional().nullable(),
   notes: z.string().trim().max(500).optional().nullable()
 });
 
@@ -73,6 +76,10 @@ const shareReportSchema = z.object({
   recipientFirstName: z.string().trim().min(1).optional(),
   recipientLastName: z.string().trim().min(1).optional(),
   recipientPhone: nigeriaPhoneSchema.optional(),
+  note: z.string().trim().max(500).optional()
+});
+
+const landlordReferenceRequestSchema = z.object({
   note: z.string().trim().max(500).optional()
 });
 
@@ -213,6 +220,21 @@ router.post("/renter/linked-cases/:linkedCaseId/accept-score-request", async (re
     res.json(result);
   } catch (error) {
     next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid score request acceptance", 400, "VALIDATION_ERROR") : error);
+  }
+});
+
+router.post("/renter/linked-cases/:linkedCaseId/request-landlord-reference", async (req, res, next) => {
+  try {
+    const params = z.object({ linkedCaseId: z.string().uuid() }).parse(req.params);
+    const body = landlordReferenceRequestSchema.parse(req.body);
+    const result = await requestLandlordReference({
+      publicAccountId: req.user!.userId,
+      linkedCaseId: params.linkedCaseId,
+      note: body.note
+    });
+    res.json(result);
+  } catch (error) {
+    next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid landlord reference request", 400, "VALIDATION_ERROR") : error);
   }
 });
 

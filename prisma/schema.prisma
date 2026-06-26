@@ -121,6 +121,24 @@ enum RentScorePaymentStatus {
   CANCELLED
 }
 
+enum LandlordReferenceRequestStatus {
+  PENDING
+  COMPLETED
+  DECLINED
+}
+
+enum LandlordReferenceRecommendation {
+  STRONGLY_RECOMMEND
+  RECOMMEND
+  NEUTRAL
+  DO_NOT_RECOMMEND
+}
+
+enum RentScoreOverrideScope {
+  BREAKDOWN_ITEM
+  CATEGORY
+}
+
 model User {
   id              String           @id @default(uuid())
   fullName        String
@@ -138,6 +156,7 @@ model User {
   confirmedRentScorePayments RentScorePayment[] @relation("RentScorePaymentConfirmedBy")
   reportApprovedRentScorePayments RentScorePayment[] @relation("RentScorePaymentReportApprovedBy")
   rentScoreEvents RentScoreEvent[]
+  createdRentScoreOverrides RentScoreOverride[] @relation("RentScoreOverrideCreatedBy")
 
   @@index([role])
   @@index([status])
@@ -164,6 +183,8 @@ model PublicAccount {
   address            String
   propertyCount      String?
   portfolioType      String?
+  residenceMoveCount5y Int?
+  employerCount5y   Int?
   notes              String?
   passportPhotoDocumentId String?
   emailVerifiedAt    DateTime?
@@ -191,6 +212,9 @@ model PublicAccount {
   receivedRentScoreShares RenterScoreShare[]   @relation("RenterScoreSharesReceived")
   documents          PublicAccountDocument[]   @relation("PublicAccountDocuments")
   notifications      PublicAccountNotification[]
+  landlordReferenceRequestsSent LandlordReferenceRequest[] @relation("LandlordReferenceRequestRenter")
+  landlordReferenceRequestsReceived LandlordReferenceRequest[] @relation("LandlordReferenceRequestLandlord")
+  rentScoreOverrides RentScoreOverride[]
   passportPhotoDocument PublicAccountDocument? @relation("PublicAccountPassportPhoto", fields: [passportPhotoDocumentId], references: [id], onDelete: SetNull)
 
   @@index([accountType])
@@ -321,8 +345,27 @@ model RentScorePolicy {
   updatedAt   DateTime        @updatedAt
 
   rules       RentScoreRule[]
+  categories  RentScoreCategoryConfig[]
 
   @@index([isActive])
+}
+
+model RentScoreCategoryConfig {
+  id          String          @id @default(uuid())
+  policyId    String
+  code        String
+  name        String
+  maxScore    Int
+  isActive    Boolean         @default(true)
+  sortOrder   Int             @default(0)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  policy      RentScorePolicy @relation(fields: [policyId], references: [id], onDelete: Cascade)
+
+  @@unique([policyId, code])
+  @@index([policyId, isActive])
+  @@index([sortOrder])
 }
 
 model RentScoreRule {
@@ -366,6 +409,25 @@ model RentScoreEvent {
   @@index([publicAccountId, occurredAt])
   @@index([ruleId, occurredAt])
   @@index([recordedByUserId])
+}
+
+model RentScoreOverride {
+  id              String                 @id @default(uuid())
+  publicAccountId String
+  scope           RentScoreOverrideScope
+  targetCode      String
+  note            String?
+  createdByUserId String?
+  isActive        Boolean                @default(true)
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
+
+  publicAccount   PublicAccount          @relation(fields: [publicAccountId], references: [id], onDelete: Cascade)
+  createdBy       User?                  @relation("RentScoreOverrideCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@index([publicAccountId, isActive, scope])
+  @@index([createdByUserId])
+  @@index([targetCode, isActive])
 }
 
 model RenterScoreShare {
@@ -433,6 +495,7 @@ model PropertyUnit {
   city               String
   bedroomCount       Int       @default(1)
   bathroomCount      Int       @default(1)
+  annualRentAmountNgn Int?
   isOccupied         Boolean   @default(false)
   currentTenantName  String?
   currentTenantEmail String?
@@ -493,6 +556,7 @@ model ProposedRenter {
   rentScorePayments  RentScorePayment[]
   paymentSchedules   PaymentSchedule[]
   activities         ProposedRenterActivity[]
+  landlordReferenceRequests LandlordReferenceRequest[]
 
   @@index([propertyId, status])
   @@index([propertyUnitId, status])
@@ -617,4 +681,26 @@ model ProposedRenterActivity {
   @@index([proposedRenterId, createdAt])
   @@index([actorAccountId])
   @@index([activityType, createdAt])
+}
+
+model LandlordReferenceRequest {
+  id                String                          @id @default(uuid())
+  proposedRenterId  String
+  renterAccountId   String
+  landlordAccountId String
+  status            LandlordReferenceRequestStatus @default(PENDING)
+  recommendation    LandlordReferenceRecommendation?
+  note              String?
+  requestedAt       DateTime                        @default(now())
+  respondedAt       DateTime?
+  createdAt         DateTime                        @default(now())
+  updatedAt         DateTime                        @updatedAt
+
+  proposedRenter    ProposedRenter                  @relation(fields: [proposedRenterId], references: [id], onDelete: Cascade)
+  renterAccount     PublicAccount                   @relation("LandlordReferenceRequestRenter", fields: [renterAccountId], references: [id], onDelete: Cascade)
+  landlordAccount   PublicAccount                   @relation("LandlordReferenceRequestLandlord", fields: [landlordAccountId], references: [id], onDelete: Cascade)
+
+  @@index([proposedRenterId, createdAt])
+  @@index([renterAccountId, createdAt])
+  @@index([landlordAccountId, status, createdAt])
 }

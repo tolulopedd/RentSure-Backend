@@ -1,4 +1,5 @@
 import type {
+  LandlordReferenceRecommendation,
   PaymentScheduleStatus,
   PaymentScheduleType,
   Prisma,
@@ -10,7 +11,7 @@ import { prisma } from "../../prisma/client";
 import { AppError } from "../../common/errors/AppError";
 import { logger } from "../../common/logger/logger";
 import { env } from "../../config/env";
-import { buildRentScoreSnapshot, recordRentScoreEvent } from "../rent-score/rent-score.service";
+import { buildRentScoreSnapshot, replaceRentScoreEventsByCodes, syncUtilityPaymentHistoryEvent } from "../rent-score/rent-score.service";
 import { attachPassportPhotoToPublicAccount, buildPublicDocumentViewUrl, toPublicDocumentAsset } from "../storage/storage.service";
 import { renderTransactionalEmail } from "../mail/mail-templates";
 import { sendTransactionalMail } from "../mail/mail.service";
@@ -821,7 +822,14 @@ export async function getWorkspaceOverview(publicAccountId: string) {
         label: unit.label,
         address: unit.address,
         city: unit.city,
-        state: unit.state
+        state: unit.state,
+        bedroomCount: unit.bedroomCount,
+        bathroomCount: unit.bathroomCount,
+        annualRentAmountNgn: unit.annualRentAmountNgn,
+        isOccupied: unit.isOccupied,
+        currentTenantName: unit.currentTenantName,
+        currentTenantEmail: unit.currentTenantEmail,
+        currentTenantPhone: unit.currentTenantPhone
       }))
     })),
     recentRenters: recentItems
@@ -960,6 +968,7 @@ export async function listWorkspaceProperties(publicAccountId: string) {
         state: unit.state,
         bedroomCount: unit.bedroomCount,
         bathroomCount: unit.bathroomCount,
+        annualRentAmountNgn: unit.annualRentAmountNgn,
         isOccupied: unit.isOccupied,
         currentTenantName: unit.currentTenantName,
         currentTenantEmail: unit.currentTenantEmail,
@@ -984,6 +993,7 @@ export async function createWorkspaceProperty(input: {
     label: string;
     bedroomCount: number;
     bathroomCount: number;
+    annualRentAmountNgn?: number | null;
     isOccupied: boolean;
     currentTenantName?: string;
     currentTenantEmail?: string;
@@ -1015,6 +1025,7 @@ export async function createWorkspaceProperty(input: {
       label: unit.label.trim() || `Unit ${index + 1}`,
       bedroomCount: unit.bedroomCount,
       bathroomCount: unit.bathroomCount,
+      annualRentAmountNgn: unit.annualRentAmountNgn ?? null,
       isOccupied: unit.isOccupied,
       currentTenantName: unit.isOccupied ? unit.currentTenantName?.trim() || null : null,
       currentTenantEmail: unit.isOccupied ? normalizeOptionalEmail(unit.currentTenantEmail) : null,
@@ -1072,6 +1083,7 @@ export async function createWorkspaceProperty(input: {
         city: propertyCity,
         bedroomCount: unit.bedroomCount,
         bathroomCount: unit.bathroomCount,
+        annualRentAmountNgn: unit.annualRentAmountNgn,
         isOccupied: unit.isOccupied,
         currentTenantName: unit.currentTenantName,
         currentTenantEmail: unit.currentTenantEmail,
@@ -1099,6 +1111,7 @@ export async function updateWorkspaceProperty(input: {
     label: string;
     bedroomCount: number;
     bathroomCount: number;
+    annualRentAmountNgn?: number | null;
     isOccupied: boolean;
     currentTenantName?: string;
     currentTenantEmail?: string;
@@ -1131,6 +1144,7 @@ export async function updateWorkspaceProperty(input: {
       label: unit.label.trim() || `Unit ${index + 1}`,
       bedroomCount: unit.bedroomCount,
       bathroomCount: unit.bathroomCount,
+      annualRentAmountNgn: unit.annualRentAmountNgn ?? null,
       isOccupied: unit.isOccupied,
       currentTenantName: unit.isOccupied ? unit.currentTenantName?.trim() || null : null,
       currentTenantEmail: unit.isOccupied ? normalizeOptionalEmail(unit.currentTenantEmail) : null,
@@ -1193,6 +1207,7 @@ export async function updateWorkspaceProperty(input: {
         city: propertyCity,
         bedroomCount: unit.bedroomCount,
         bathroomCount: unit.bathroomCount,
+        annualRentAmountNgn: unit.annualRentAmountNgn,
         isOccupied: unit.isOccupied,
         currentTenantName: unit.currentTenantName,
         currentTenantEmail: unit.currentTenantEmail,
@@ -1431,7 +1446,11 @@ export async function listWorkspaceQueue(publicAccountId: string) {
                 city: item.propertyUnit.city,
                 state: item.propertyUnit.state,
                 bedroomCount: item.propertyUnit.bedroomCount,
-                bathroomCount: item.propertyUnit.bathroomCount
+                bathroomCount: item.propertyUnit.bathroomCount,
+                isOccupied: item.propertyUnit.isOccupied,
+                currentTenantName: item.propertyUnit.currentTenantName,
+                currentTenantEmail: item.propertyUnit.currentTenantEmail,
+                currentTenantPhone: item.propertyUnit.currentTenantPhone
               }
             : null,
           linkedRentScore: canViewRentScore ? await mapLinkedRentScore(item.renterAccountId) : null,
@@ -1563,7 +1582,7 @@ export async function getWorkspaceQueueItem(publicAccountId: string, proposedRen
   const account = await getWorkspaceAccount(publicAccountId, tx);
   const item = await getAccessibleProposedRenter(publicAccountId, proposedRenterId, tx);
 
-  const [scoreRequests, paymentSchedules, latestRentScorePayment] = await Promise.all([
+  const [scoreRequests, paymentSchedules, latestRentScorePayment, landlordReferenceRequests] = await Promise.all([
     tx.scoreRequest.findMany({
       where: { proposedRenterId },
       include: {
@@ -1583,6 +1602,14 @@ export async function getWorkspaceQueueItem(publicAccountId: string, proposedRen
     }),
     tx.rentScorePayment.findFirst({
       where: { proposedRenterId },
+      orderBy: { createdAt: "desc" }
+    }),
+    tx.landlordReferenceRequest.findMany({
+      where: { proposedRenterId },
+      include: {
+        renterAccount: true,
+        landlordAccount: true
+      },
       orderBy: { createdAt: "desc" }
     })
   ]);
@@ -1691,6 +1718,24 @@ export async function getWorkspaceQueueItem(publicAccountId: string, proposedRen
             email: request.forwardedTo.email
           }
         : null
+    })),
+    landlordReferenceRequests: landlordReferenceRequests.map((request) => ({
+      id: request.id,
+      status: request.status,
+      recommendation: request.recommendation,
+      note: request.note,
+      requestedAt: request.requestedAt,
+      respondedAt: request.respondedAt,
+      renter: {
+        id: request.renterAccount.id,
+        name: publicAccountDisplayName(request.renterAccount),
+        email: request.renterAccount.email
+      },
+      landlord: {
+        id: request.landlordAccount.id,
+        name: publicAccountDisplayName(request.landlordAccount),
+        email: request.landlordAccount.email
+      }
     })),
     latestRentScorePayment: latestRentScorePayment
       ? {
@@ -2648,6 +2693,10 @@ export async function createWorkspacePaymentSchedule(input: {
       tx
     });
 
+    if (input.paymentType === "UTILITY" && proposedRenter.renterAccountId) {
+      await syncUtilityPaymentHistoryEvent(proposedRenter.renterAccountId, tx);
+    }
+
     return getWorkspaceQueueItem(input.publicAccountId, proposedRenter.id, tx);
   });
 }
@@ -2697,6 +2746,16 @@ export async function updateWorkspacePaymentSchedule(input: {
       tx
     });
 
+    if (schedule.paymentType === "UTILITY") {
+      const proposedRenter = await tx.proposedRenter.findUnique({
+        where: { id: schedule.proposedRenterId },
+        select: { renterAccountId: true }
+      });
+      if (proposedRenter?.renterAccountId) {
+        await syncUtilityPaymentHistoryEvent(proposedRenter.renterAccountId, tx);
+      }
+    }
+
     return getWorkspaceQueueItem(input.publicAccountId, schedule.proposedRenterId, tx);
   });
 }
@@ -2717,6 +2776,20 @@ export async function confirmWorkspacePaymentSchedule(input: {
             some: {
               publicAccountId: input.publicAccountId
             }
+          }
+        }
+      },
+      select: {
+        id: true,
+        proposedRenterId: true,
+        paymentType: true,
+        dueDate: true,
+        paidAt: true,
+        confirmationNote: true,
+        confirmationInitiatedAt: true,
+        proposedRenter: {
+          select: {
+            renterAccountId: true
           }
         }
       }
@@ -2745,33 +2818,6 @@ export async function confirmWorkspacePaymentSchedule(input: {
       }
     });
 
-    const linkedRenterAccountId = await tx.proposedRenter
-      .findUnique({
-        where: { id: schedule.proposedRenterId },
-        select: { renterAccountId: true }
-      })
-      .then((item) => item?.renterAccountId || null);
-
-    if (actor.accountType === "LANDLORD" && linkedRenterAccountId) {
-      if (schedule.paymentType === "RENT" && timing === "ON_TIME") {
-        await recordRentScoreEvent({
-          publicAccountId: linkedRenterAccountId,
-          ruleCode: "RENT_PAID_ON_TIME",
-          quantity: 1,
-          sourceNote: "Landlord confirmed on-time rent payment"
-        });
-      }
-
-      if (schedule.paymentType === "UTILITY" && timing === "ON_TIME") {
-        await recordRentScoreEvent({
-          publicAccountId: linkedRenterAccountId,
-          ruleCode: "CONSISTENT_UTILITY_PAYMENT",
-          quantity: 1,
-          sourceNote: "Landlord confirmed on-time utility payment"
-        });
-      }
-    }
-
     await logProposedRenterActivity({
       proposedRenterId: schedule.proposedRenterId,
       actorAccountId: input.publicAccountId,
@@ -2788,7 +2834,177 @@ export async function confirmWorkspacePaymentSchedule(input: {
       tx
     });
 
+    if (schedule.paymentType === "UTILITY" && schedule.proposedRenter?.renterAccountId) {
+      await syncUtilityPaymentHistoryEvent(schedule.proposedRenter.renterAccountId, tx);
+    }
+
     return getWorkspaceQueueItem(input.publicAccountId, schedule.proposedRenterId, tx);
+  });
+}
+
+function behaviourRuleCodeFromRating(rating: "EXCELLENT" | "GOOD" | "FAIR" | "POOR") {
+  if (rating === "EXCELLENT") return "RENTAL_BEHAVIOUR_EXCELLENT";
+  if (rating === "GOOD") return "RENTAL_BEHAVIOUR_GOOD";
+  if (rating === "FAIR") return "RENTAL_BEHAVIOUR_FAIR";
+  return "RENTAL_BEHAVIOUR_POOR";
+}
+
+function landlordReferenceRuleCodeFromRecommendation(recommendation: LandlordReferenceRecommendation) {
+  if (recommendation === "STRONGLY_RECOMMEND") return "LANDLORD_REFERENCE_STRONGLY_RECOMMEND";
+  if (recommendation === "RECOMMEND") return "LANDLORD_REFERENCE_RECOMMEND";
+  if (recommendation === "NEUTRAL") return "LANDLORD_REFERENCE_NEUTRAL";
+  return "LANDLORD_REFERENCE_DO_NOT_RECOMMEND";
+}
+
+export async function submitWorkspaceRenterBehaviourReview(input: {
+  publicAccountId: string;
+  proposedRenterId: string;
+  rating: "EXCELLENT" | "GOOD" | "FAIR" | "POOR";
+  damagesReported?: boolean;
+  note?: string;
+  complaints?: string[];
+}) {
+  return prisma.$transaction(async (tx) => {
+    const actor = await getWorkspaceAccount(input.publicAccountId, tx);
+    if (actor.accountType !== "LANDLORD") {
+      throw new AppError("Only landlord accounts can submit renter behaviour reviews", 403, "FORBIDDEN");
+    }
+
+    const proposedRenter = await getAccessibleProposedRenter(input.publicAccountId, input.proposedRenterId, tx);
+    if (!proposedRenter.renterAccountId) {
+      throw new AppError("This linked renter does not have an active renter account yet", 400, "VALIDATION_ERROR");
+    }
+
+    await replaceRentScoreEventsByCodes({
+      publicAccountId: proposedRenter.renterAccountId,
+      tx,
+      codes: [
+        "RENTAL_BEHAVIOUR_EXCELLENT",
+        "RENTAL_BEHAVIOUR_GOOD",
+        "RENTAL_BEHAVIOUR_FAIR",
+        "RENTAL_BEHAVIOUR_POOR"
+      ],
+      newEvent: {
+        ruleCode: behaviourRuleCodeFromRating(input.rating),
+        recordedByUserId: null,
+        sourceNote: input.note?.trim() || `Landlord rated renter behaviour as ${input.rating.toLowerCase()}.`,
+        metadata: {
+          complaints: input.complaints?.filter(Boolean) || []
+        } as Prisma.JsonObject
+      }
+    });
+
+    await replaceRentScoreEventsByCodes({
+      publicAccountId: proposedRenter.renterAccountId,
+      tx,
+      codes: ["DAMAGES_REPORTED"],
+      newEvent: input.damagesReported
+        ? {
+            ruleCode: "DAMAGES_REPORTED",
+            recordedByUserId: null,
+            sourceNote: input.note?.trim() || "Landlord reported damages or serious misuse.",
+            metadata: {
+              complaints: input.complaints?.filter(Boolean) || []
+            } as Prisma.JsonObject
+          }
+        : null
+    });
+
+    await logProposedRenterActivity({
+      proposedRenterId: proposedRenter.id,
+      actorAccountId: input.publicAccountId,
+      activityType: "COMMENT",
+      message: `Landlord submitted a renter behaviour review: ${input.rating.replaceAll("_", " ").toLowerCase()}.`,
+      metadata: {
+        rating: input.rating,
+        damagesReported: Boolean(input.damagesReported),
+        complaints: input.complaints?.filter(Boolean) || [],
+        note: input.note?.trim() || null
+      } as Prisma.JsonObject,
+      tx
+    });
+
+    return getWorkspaceQueueItem(input.publicAccountId, proposedRenter.id, tx);
+  });
+}
+
+export async function respondToLandlordReferenceRequest(input: {
+  publicAccountId: string;
+  requestId: string;
+  recommendation: LandlordReferenceRecommendation;
+  note?: string;
+  decline?: boolean;
+}) {
+  return prisma.$transaction(async (tx) => {
+    const actor = await getWorkspaceAccount(input.publicAccountId, tx);
+    if (actor.accountType !== "LANDLORD") {
+      throw new AppError("Only landlord accounts can respond to landlord reference requests", 403, "FORBIDDEN");
+    }
+
+    const request = await tx.landlordReferenceRequest.findFirst({
+      where: {
+        id: input.requestId,
+        landlordAccountId: input.publicAccountId
+      },
+      include: {
+        proposedRenter: true
+      }
+    });
+
+    if (!request) {
+      throw new AppError("Landlord reference request not found", 404, "NOT_FOUND");
+    }
+
+    const status = input.decline ? "DECLINED" : "COMPLETED";
+    await tx.landlordReferenceRequest.update({
+      where: { id: request.id },
+      data: {
+        status,
+        recommendation: status === "COMPLETED" ? input.recommendation : null,
+        note: input.note?.trim() || null,
+        respondedAt: new Date()
+      }
+    });
+
+    if (status === "COMPLETED") {
+      await replaceRentScoreEventsByCodes({
+        publicAccountId: request.renterAccountId,
+        tx,
+        codes: [
+          "LANDLORD_REFERENCE_STRONGLY_RECOMMEND",
+          "LANDLORD_REFERENCE_RECOMMEND",
+          "LANDLORD_REFERENCE_NEUTRAL",
+          "LANDLORD_REFERENCE_DO_NOT_RECOMMEND"
+        ],
+        newEvent: {
+          ruleCode: landlordReferenceRuleCodeFromRecommendation(input.recommendation),
+          sourceNote: input.note?.trim() || "Landlord reference submitted.",
+          metadata: {
+            requestId: request.id,
+            landlordAccountId: input.publicAccountId
+          } as Prisma.JsonObject
+        }
+      });
+    }
+
+    await logProposedRenterActivity({
+      proposedRenterId: request.proposedRenterId,
+      actorAccountId: input.publicAccountId,
+      activityType: "COMMENT",
+      message:
+        status === "COMPLETED"
+          ? `Landlord responded to a reference request with ${input.recommendation.replaceAll("_", " ").toLowerCase()}.`
+          : "Landlord declined a reference request.",
+      metadata: {
+        requestId: request.id,
+        status,
+        recommendation: status === "COMPLETED" ? input.recommendation : null,
+        note: input.note?.trim() || null
+      } as Prisma.JsonObject,
+      tx
+    });
+
+    return getWorkspaceQueueItem(input.publicAccountId, request.proposedRenterId, tx);
   });
 }
 
