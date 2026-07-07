@@ -35,6 +35,13 @@ function publicAccountDisplayName(account: Pick<PublicAccount, "firstName" | "la
   return [account.firstName, account.lastName].filter(Boolean).join(" ") || "Unnamed account";
 }
 
+function landlordPropertyIdentity(account: Pick<PublicAccount, "email" | "firstName" | "lastName" | "organizationName">) {
+  return {
+    ownerName: publicAccountDisplayName(account),
+    landlordEmail: normalizeEmail(account.email)
+  };
+}
+
 function propertySummary(property: {
   name: string;
   propertyType?: string | null;
@@ -1005,18 +1012,7 @@ export async function createWorkspaceProperty(input: {
     if (account.accountType !== "LANDLORD") {
       throw new AppError("Only landlord accounts can add properties", 403, "FORBIDDEN");
     }
-    const normalizedLandlordEmail = normalizeEmail(input.landlordEmail);
-    const landlordAccount = await tx.publicAccount.findUnique({
-      where: { email: normalizedLandlordEmail }
-    });
-
-    if (!landlordAccount || landlordAccount.status !== "ACTIVE" || landlordAccount.accountType !== "LANDLORD") {
-      throw new AppError("Landlord email must belong to an active landlord account", 400, "INVALID_LANDLORD_EMAIL");
-    }
-
-    if (account.accountType === "LANDLORD" && landlordAccount.id !== account.id) {
-      throw new AppError("Landlord properties must be linked to your verified landlord email", 400, "INVALID_LANDLORD_EMAIL");
-    }
+    const identity = landlordPropertyIdentity(account);
 
     const propertyAddress = input.address.trim();
     const propertyState = input.state.trim();
@@ -1037,8 +1033,8 @@ export async function createWorkspaceProperty(input: {
     const property = await tx.property.create({
       data: {
         name: input.name.trim(),
-        ownerName: input.ownerName.trim(),
-        landlordEmail: normalizedLandlordEmail,
+        ownerName: identity.ownerName,
+        landlordEmail: identity.landlordEmail,
         address: propertyAddress,
         state: propertyState,
         city: propertyCity,
@@ -1059,7 +1055,7 @@ export async function createWorkspaceProperty(input: {
       where: {
         propertyId_publicAccountId_role: {
           propertyId: property.id,
-          publicAccountId: landlordAccount.id,
+          publicAccountId: account.id,
           role: "LANDLORD"
         }
       },
@@ -1068,7 +1064,7 @@ export async function createWorkspaceProperty(input: {
       },
       create: {
         propertyId: property.id,
-        publicAccountId: landlordAccount.id,
+        publicAccountId: account.id,
         role: "LANDLORD",
         isPrimary: true
       }
@@ -1124,18 +1120,7 @@ export async function updateWorkspaceProperty(input: {
       throw new AppError("Only landlord accounts can edit properties", 403, "FORBIDDEN");
     }
     const membership = await getPropertyMembership(input.publicAccountId, input.propertyId, tx);
-    const normalizedLandlordEmail = normalizeEmail(input.landlordEmail);
-    const landlordAccount = await tx.publicAccount.findUnique({
-      where: { email: normalizedLandlordEmail }
-    });
-
-    if (!landlordAccount || landlordAccount.status !== "ACTIVE" || landlordAccount.accountType !== "LANDLORD") {
-      throw new AppError("Landlord email must belong to an active landlord account", 400, "INVALID_LANDLORD_EMAIL");
-    }
-
-    if (account.accountType === "LANDLORD" && landlordAccount.id !== account.id) {
-      throw new AppError("Landlord properties must be linked to your verified landlord email", 400, "INVALID_LANDLORD_EMAIL");
-    }
+    const identity = landlordPropertyIdentity(account);
 
     const propertyAddress = input.address.trim();
     const propertyState = input.state.trim();
@@ -1157,8 +1142,8 @@ export async function updateWorkspaceProperty(input: {
       where: { id: membership.propertyId },
       data: {
         name: input.name.trim(),
-        ownerName: input.ownerName.trim(),
-        landlordEmail: normalizedLandlordEmail,
+        ownerName: identity.ownerName,
+        landlordEmail: identity.landlordEmail,
         address: propertyAddress,
         state: propertyState,
         city: propertyCity,
@@ -1179,7 +1164,7 @@ export async function updateWorkspaceProperty(input: {
       where: {
         propertyId_publicAccountId_role: {
           propertyId: membership.propertyId,
-          publicAccountId: landlordAccount.id,
+          publicAccountId: account.id,
           role: "LANDLORD"
         }
       },
@@ -1188,7 +1173,7 @@ export async function updateWorkspaceProperty(input: {
       },
       create: {
         propertyId: membership.propertyId,
-        publicAccountId: landlordAccount.id,
+        publicAccountId: account.id,
         role: "LANDLORD",
         isPrimary: true
       }
@@ -1998,7 +1983,7 @@ export async function createWorkspaceProposedRenter(input: {
 }) {
   let supportsPropertyUnitColumn = await supportsProposedRenterPropertyUnitColumn();
 
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     const membership = await getPropertyMembership(input.publicAccountId, input.propertyId, tx);
     const propertyUnit = await tx.propertyUnit.findFirst({
       where: {
@@ -2174,12 +2159,17 @@ export async function createWorkspaceProposedRenter(input: {
       tx
     });
 
-    const detail = await getWorkspaceQueueItem(input.publicAccountId, renter.id, tx);
     return {
-      ...detail,
+      proposedRenterId: renter.id,
       invitePreviewUrl: inviteState.invitePreviewUrl
     };
   });
+
+  const detail = await getWorkspaceQueueItem(input.publicAccountId, result.proposedRenterId);
+  return {
+    ...detail,
+    invitePreviewUrl: result.invitePreviewUrl
+  };
 }
 
 export async function listPendingRenterInvites() {
@@ -2344,7 +2334,7 @@ export async function decideWorkspaceProposedRenter(input: {
   decision: ProposedRenterDecision;
   note?: string;
 }) {
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     const account = await getWorkspaceAccount(input.publicAccountId, tx);
     if (account.accountType !== "LANDLORD") {
       throw new AppError("Only landlord accounts can take approve, hold, or decline decisions", 403, "FORBIDDEN");
@@ -2482,8 +2472,10 @@ export async function decideWorkspaceProposedRenter(input: {
       );
     }
 
-    return getWorkspaceQueueItem(input.publicAccountId, proposedRenter.id, tx);
+    return { proposedRenterId: proposedRenter.id };
   });
+
+  return getWorkspaceQueueItem(input.publicAccountId, result.proposedRenterId);
 }
 
 export async function requestWorkspaceRentScore(input: {
@@ -2491,7 +2483,7 @@ export async function requestWorkspaceRentScore(input: {
   proposedRenterId: string;
   notes?: string;
 }) {
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     const currentAccount = await getWorkspaceAccount(input.publicAccountId, tx);
     const proposedRenter = await getAccessibleProposedRenter(input.publicAccountId, input.proposedRenterId, tx);
 
@@ -2528,8 +2520,10 @@ export async function requestWorkspaceRentScore(input: {
       tx
     });
 
-    return getWorkspaceQueueItem(input.publicAccountId, proposedRenter.id, tx);
+    return { proposedRenterId: proposedRenter.id };
   });
+
+  return getWorkspaceQueueItem(input.publicAccountId, result.proposedRenterId);
 }
 
 export async function forwardWorkspaceScoreRequest(input: {
@@ -2537,7 +2531,7 @@ export async function forwardWorkspaceScoreRequest(input: {
   scoreRequestId: string;
   forwardToAccountId?: string;
 }) {
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     const currentAccount = await getWorkspaceAccount(input.publicAccountId, tx);
     if (currentAccount.accountType !== "AGENT") {
       throw new AppError("Only agent accounts can forward rent score reports to landlord", 403, "FORBIDDEN");
@@ -2614,8 +2608,10 @@ export async function forwardWorkspaceScoreRequest(input: {
       tx
     });
 
-    return getWorkspaceQueueItem(input.publicAccountId, scoreRequest.proposedRenter.id, tx);
+    return { proposedRenterId: scoreRequest.proposedRenter.id };
   });
+
+  return getWorkspaceQueueItem(input.publicAccountId, result.proposedRenterId);
 }
 
 export async function createWorkspacePaymentSchedule(input: {
@@ -2631,7 +2627,7 @@ export async function createWorkspacePaymentSchedule(input: {
     occurrences?: number;
   };
 }) {
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     const proposedRenter = await getAccessibleProposedRenter(input.publicAccountId, input.proposedRenterId, tx);
     if (proposedRenter.decision !== "APPROVED") {
       throw new AppError("Payments can only be logged after the renter has been approved", 400, "RENTER_NOT_APPROVED");
@@ -2697,8 +2693,10 @@ export async function createWorkspacePaymentSchedule(input: {
       await syncUtilityPaymentHistoryEvent(proposedRenter.renterAccountId, tx);
     }
 
-    return getWorkspaceQueueItem(input.publicAccountId, proposedRenter.id, tx);
+    return { proposedRenterId: proposedRenter.id };
   });
+
+  return getWorkspaceQueueItem(input.publicAccountId, result.proposedRenterId);
 }
 
 export async function updateWorkspacePaymentSchedule(input: {
@@ -2707,7 +2705,7 @@ export async function updateWorkspacePaymentSchedule(input: {
   status: PaymentScheduleStatus;
   paidAt?: Date | null;
 }) {
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     await getWorkspaceAccount(input.publicAccountId, tx);
     const schedule = await tx.paymentSchedule.findFirst({
       where: {
@@ -2756,8 +2754,10 @@ export async function updateWorkspacePaymentSchedule(input: {
       }
     }
 
-    return getWorkspaceQueueItem(input.publicAccountId, schedule.proposedRenterId, tx);
+    return { proposedRenterId: schedule.proposedRenterId };
   });
+
+  return getWorkspaceQueueItem(input.publicAccountId, result.proposedRenterId);
 }
 
 export async function confirmWorkspacePaymentSchedule(input: {
@@ -2766,7 +2766,7 @@ export async function confirmWorkspacePaymentSchedule(input: {
   paidAt?: Date | null;
   note?: string;
 }) {
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     const actor = await getWorkspaceAccount(input.publicAccountId, tx);
     const schedule = await tx.paymentSchedule.findFirst({
       where: {
@@ -2838,15 +2838,22 @@ export async function confirmWorkspacePaymentSchedule(input: {
       await syncUtilityPaymentHistoryEvent(schedule.proposedRenter.renterAccountId, tx);
     }
 
-    return getWorkspaceQueueItem(input.publicAccountId, schedule.proposedRenterId, tx);
+    return { proposedRenterId: schedule.proposedRenterId };
   });
+
+  return getWorkspaceQueueItem(input.publicAccountId, result.proposedRenterId);
 }
 
-function behaviourRuleCodeFromRating(rating: "EXCELLENT" | "GOOD" | "FAIR" | "POOR") {
-  if (rating === "EXCELLENT") return "RENTAL_BEHAVIOUR_EXCELLENT";
-  if (rating === "GOOD") return "RENTAL_BEHAVIOUR_GOOD";
-  if (rating === "FAIR") return "RENTAL_BEHAVIOUR_FAIR";
-  return "RENTAL_BEHAVIOUR_POOR";
+function propertyMaintenanceRuleCodeFromRating(rating: "EXCELLENT" | "GOOD" | "POOR") {
+  if (rating === "EXCELLENT") return "PROPERTY_MAINTENANCE_EXCELLENT";
+  if (rating === "GOOD") return "PROPERTY_MAINTENANCE_GOOD";
+  return "PROPERTY_MAINTENANCE_POOR";
+}
+
+function leaseComplianceRuleCodeFromRating(rating: "EXCELLENT" | "GOOD" | "POOR") {
+  if (rating === "EXCELLENT") return "LEASE_COMPLIANCE_EXCELLENT";
+  if (rating === "GOOD") return "LEASE_COMPLIANCE_GOOD";
+  return "LEASE_COMPLIANCE_POOR";
 }
 
 function landlordReferenceRuleCodeFromRecommendation(recommendation: LandlordReferenceRecommendation) {
@@ -2859,12 +2866,12 @@ function landlordReferenceRuleCodeFromRecommendation(recommendation: LandlordRef
 export async function submitWorkspaceRenterBehaviourReview(input: {
   publicAccountId: string;
   proposedRenterId: string;
-  rating: "EXCELLENT" | "GOOD" | "FAIR" | "POOR";
-  damagesReported?: boolean;
+  propertyMaintenanceRating: "EXCELLENT" | "GOOD" | "POOR";
+  leaseComplianceRating: "EXCELLENT" | "GOOD" | "POOR";
   note?: string;
   complaints?: string[];
 }) {
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     const actor = await getWorkspaceAccount(input.publicAccountId, tx);
     if (actor.accountType !== "LANDLORD") {
       throw new AppError("Only landlord accounts can submit renter behaviour reviews", 403, "FORBIDDEN");
@@ -2879,15 +2886,14 @@ export async function submitWorkspaceRenterBehaviourReview(input: {
       publicAccountId: proposedRenter.renterAccountId,
       tx,
       codes: [
-        "RENTAL_BEHAVIOUR_EXCELLENT",
-        "RENTAL_BEHAVIOUR_GOOD",
-        "RENTAL_BEHAVIOUR_FAIR",
-        "RENTAL_BEHAVIOUR_POOR"
+        "PROPERTY_MAINTENANCE_EXCELLENT",
+        "PROPERTY_MAINTENANCE_GOOD",
+        "PROPERTY_MAINTENANCE_POOR"
       ],
       newEvent: {
-        ruleCode: behaviourRuleCodeFromRating(input.rating),
+        ruleCode: propertyMaintenanceRuleCodeFromRating(input.propertyMaintenanceRating),
         recordedByUserId: null,
-        sourceNote: input.note?.trim() || `Landlord rated renter behaviour as ${input.rating.toLowerCase()}.`,
+        sourceNote: input.note?.trim() || `Landlord rated property maintenance as ${input.propertyMaintenanceRating.toLowerCase()}.`,
         metadata: {
           complaints: input.complaints?.filter(Boolean) || []
         } as Prisma.JsonObject
@@ -2897,35 +2903,39 @@ export async function submitWorkspaceRenterBehaviourReview(input: {
     await replaceRentScoreEventsByCodes({
       publicAccountId: proposedRenter.renterAccountId,
       tx,
-      codes: ["DAMAGES_REPORTED"],
-      newEvent: input.damagesReported
-        ? {
-            ruleCode: "DAMAGES_REPORTED",
-            recordedByUserId: null,
-            sourceNote: input.note?.trim() || "Landlord reported damages or serious misuse.",
-            metadata: {
-              complaints: input.complaints?.filter(Boolean) || []
-            } as Prisma.JsonObject
-          }
-        : null
+      codes: [
+        "LEASE_COMPLIANCE_EXCELLENT",
+        "LEASE_COMPLIANCE_GOOD",
+        "LEASE_COMPLIANCE_POOR"
+      ],
+      newEvent: {
+        ruleCode: leaseComplianceRuleCodeFromRating(input.leaseComplianceRating),
+        recordedByUserId: null,
+        sourceNote: input.note?.trim() || `Landlord rated lease compliance as ${input.leaseComplianceRating.toLowerCase()}.`,
+        metadata: {
+          complaints: input.complaints?.filter(Boolean) || []
+        } as Prisma.JsonObject
+      }
     });
 
     await logProposedRenterActivity({
       proposedRenterId: proposedRenter.id,
       actorAccountId: input.publicAccountId,
       activityType: "COMMENT",
-      message: `Landlord submitted a renter behaviour review: ${input.rating.replaceAll("_", " ").toLowerCase()}.`,
+      message: `Landlord submitted behaviour review: maintenance ${input.propertyMaintenanceRating.toLowerCase()}, lease compliance ${input.leaseComplianceRating.toLowerCase()}.`,
       metadata: {
-        rating: input.rating,
-        damagesReported: Boolean(input.damagesReported),
+        propertyMaintenanceRating: input.propertyMaintenanceRating,
+        leaseComplianceRating: input.leaseComplianceRating,
         complaints: input.complaints?.filter(Boolean) || [],
         note: input.note?.trim() || null
       } as Prisma.JsonObject,
       tx
     });
 
-    return getWorkspaceQueueItem(input.publicAccountId, proposedRenter.id, tx);
+    return { proposedRenterId: proposedRenter.id };
   });
+
+  return getWorkspaceQueueItem(input.publicAccountId, result.proposedRenterId);
 }
 
 export async function respondToLandlordReferenceRequest(input: {
@@ -2935,7 +2945,7 @@ export async function respondToLandlordReferenceRequest(input: {
   note?: string;
   decline?: boolean;
 }) {
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     const actor = await getWorkspaceAccount(input.publicAccountId, tx);
     if (actor.accountType !== "LANDLORD") {
       throw new AppError("Only landlord accounts can respond to landlord reference requests", 403, "FORBIDDEN");
@@ -3004,8 +3014,10 @@ export async function respondToLandlordReferenceRequest(input: {
       tx
     });
 
-    return getWorkspaceQueueItem(input.publicAccountId, request.proposedRenterId, tx);
+    return { proposedRenterId: request.proposedRenterId };
   });
+
+  return getWorkspaceQueueItem(input.publicAccountId, result.proposedRenterId);
 }
 
 export async function commentOnWorkspaceProposedRenter(input: {
@@ -3013,7 +3025,7 @@ export async function commentOnWorkspaceProposedRenter(input: {
   proposedRenterId: string;
   message: string;
 }) {
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     const proposedRenter = await getAccessibleProposedRenter(input.publicAccountId, input.proposedRenterId, tx);
     await logProposedRenterActivity({
       proposedRenterId: proposedRenter.id,
@@ -3022,6 +3034,8 @@ export async function commentOnWorkspaceProposedRenter(input: {
       message: input.message.trim(),
       tx
     });
-    return getWorkspaceQueueItem(input.publicAccountId, proposedRenter.id, tx);
+    return { proposedRenterId: proposedRenter.id };
   });
+
+  return getWorkspaceQueueItem(input.publicAccountId, result.proposedRenterId);
 }

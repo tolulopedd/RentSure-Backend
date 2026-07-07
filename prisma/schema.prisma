@@ -30,6 +30,11 @@ enum PublicEntityType {
   COMPANY
 }
 
+enum EmploymentType {
+  EMPLOYED
+  SELF_EMPLOYED
+}
+
 enum PublicAccountStatus {
   UNVERIFIED
   ACTIVE
@@ -185,6 +190,8 @@ model PublicAccount {
   portfolioType      String?
   residenceMoveCount5y Int?
   employerCount5y   Int?
+  employmentType    EmploymentType?
+  employmentYears   Int?
   notes              String?
   passportPhotoDocumentId String?
   emailVerifiedAt    DateTime?

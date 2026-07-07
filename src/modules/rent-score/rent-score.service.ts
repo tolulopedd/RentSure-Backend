@@ -7,15 +7,19 @@ const REGISTRATION_RULE_CODE = "REGISTRATION_COMPLETED";
 const PROFILE_COMPLETED_RULE_CODE = "COMPLETE_PROFILE";
 const PHONE_UPDATED_RULE_CODE = "PHONE_UPDATED";
 const GOVERNMENT_ID_RULE_CODE = "GOVERNMENT_ID_VERIFIED";
-const UTILITY_DISCONNECTION_RULE_CODE = "UTILITY_DISCONNECTION";
-const RENT_DEFAULTED_RULE_CODE = "RENT_DEFAULTED_OR_EVICTED";
-const DAMAGES_REPORTED_RULE_CODE = "DAMAGES_REPORTED";
+const RENT_MISSED_RULE_CODE = "RENT_MISSED";
+const UTILITY_MISSED_RULE_CODE = "UTILITY_MISSED";
 
-const RENT_BEHAVIOUR_RATING_CODES = [
-  "RENTAL_BEHAVIOUR_EXCELLENT",
-  "RENTAL_BEHAVIOUR_GOOD",
-  "RENTAL_BEHAVIOUR_FAIR",
-  "RENTAL_BEHAVIOUR_POOR"
+const PROPERTY_MAINTENANCE_RATING_CODES = [
+  "PROPERTY_MAINTENANCE_EXCELLENT",
+  "PROPERTY_MAINTENANCE_GOOD",
+  "PROPERTY_MAINTENANCE_POOR"
+] as const;
+
+const LEASE_COMPLIANCE_RATING_CODES = [
+  "LEASE_COMPLIANCE_EXCELLENT",
+  "LEASE_COMPLIANCE_GOOD",
+  "LEASE_COMPLIANCE_POOR"
 ] as const;
 
 const LANDLORD_REFERENCE_CODES = [
@@ -25,18 +29,34 @@ const LANDLORD_REFERENCE_CODES = [
   "LANDLORD_REFERENCE_DO_NOT_RECOMMEND"
 ] as const;
 
-const UTILITY_PAYMENT_STATE_CODES = [
+const LEGACY_RULE_CODES = [
+  "RENT_PAID_31_TO_90_DAYS_LATE",
+  "RENT_PAID_OVER_90_DAYS_LATE",
   "UTILITY_NO_OUTSTANDING_DEBT",
   "UTILITY_MINOR_OUTSTANDING_DEBT",
-  "UTILITY_SIGNIFICANT_OUTSTANDING_DEBT"
+  "UTILITY_SIGNIFICANT_OUTSTANDING_DEBT",
+  "UTILITY_DISCONNECTION",
+  "RENT_DEFAULTED_OR_EVICTED",
+  "RENTAL_BEHAVIOUR_EXCELLENT",
+  "RENTAL_BEHAVIOUR_GOOD",
+  "RENTAL_BEHAVIOUR_FAIR",
+  "RENTAL_BEHAVIOUR_POOR",
+  "DAMAGES_REPORTED",
+  "RENTAL_STABILITY_4_MOVES",
+  "RENTAL_STABILITY_5_PLUS_MOVES",
+  "EMPLOYMENT_STABILITY_1_EMPLOYER",
+  "EMPLOYMENT_STABILITY_2_EMPLOYERS",
+  "EMPLOYMENT_STABILITY_3_EMPLOYERS",
+  "EMPLOYMENT_STABILITY_4_EMPLOYERS",
+  "EMPLOYMENT_STABILITY_5_PLUS_EMPLOYERS"
 ] as const;
 
 const DEFAULT_CATEGORY_DEFINITIONS = [
   { code: "IDENTITY_VERIFICATION", name: "Identity & Verification", maxScore: 100, sortOrder: 10 },
-  { code: "PAYMENT", name: "Payment (Rent & Utility)", maxScore: 250, sortOrder: 20 },
+  { code: "PAYMENT", name: "Payment (Rent & Utility)", maxScore: 300, sortOrder: 20 },
   { code: "RENTER_BEHAVIOUR", name: "Renters Behaviour", maxScore: 200, sortOrder: 30 },
-  { code: "RENTAL_STABILITY", name: "Rental Stability", maxScore: 75, sortOrder: 40 },
-  { code: "EMPLOYMENT_STABILITY", name: "Employment Stability", maxScore: 75, sortOrder: 50 },
+  { code: "RENTAL_STABILITY", name: "Rental Stability", maxScore: 100, sortOrder: 40 },
+  { code: "EMPLOYMENT_STABILITY", name: "Employment Stability", maxScore: 100, sortOrder: 50 },
   { code: "LANDLORD_REFERENCE", name: "Landlord References", maxScore: 100, sortOrder: 60 },
   { code: "RENTER_BAND", name: "Renter Band", maxScore: 100, sortOrder: 70 }
 ] as const;
@@ -98,104 +118,105 @@ const defaultRuleDefinitions: DefaultRuleDefinition[] = [
   },
   {
     code: "RENT_PAID_ON_OR_BEFORE_DUE_DATE",
-    name: "Rent paid on or before due date",
+    name: "Rent paid on time",
     description: "Rent paid on or before the due date.",
-    points: 150,
+    points: 200,
     maxOccurrences: 1,
     sortOrder: 60
   },
   {
     code: "RENT_PAID_WITHIN_GRACE_PERIOD",
-    name: "Paid within grace period (30 days)",
-    description: "Rent paid within the allowed grace period after the due date.",
-    points: 100,
+    name: "Rent paid within grace period (60 days)",
+    description: "Rent paid within 60 days after the due date.",
+    points: 150,
     maxOccurrences: 1,
     sortOrder: 70
   },
   {
-    code: "RENT_PAID_31_TO_90_DAYS_LATE",
-    name: "Paid 31-90 days late",
-    description: "Rent paid between 31 and 90 days after the due date.",
-    points: 75,
+    code: RENT_MISSED_RULE_CODE,
+    name: "Rent missed",
+    description: "Rent was missed or remains unpaid beyond the grace period.",
+    points: 0,
     maxOccurrences: 1,
     sortOrder: 80
   },
   {
-    code: "RENT_PAID_OVER_90_DAYS_LATE",
-    name: "Paid over 90 days late",
-    description: "Rent paid more than 90 days after the due date.",
-    points: 50,
+    code: "UTILITY_PAID_ON_TIME",
+    name: "Utility paid on time",
+    description: "Utility payment was made on or before the due date.",
+    points: 100,
     maxOccurrences: 1,
     sortOrder: 90
   },
   {
-    code: "UTILITY_NO_OUTSTANDING_DEBT",
-    name: "No outstanding utility debt",
-    description: "No outstanding utility debt is recorded for the renter.",
-    points: 100,
+    code: "UTILITY_PAID_WITHIN_GRACE_PERIOD",
+    name: "Utility paid within grace period (60 days)",
+    description: "Utility payment was made within 60 days after the due date.",
+    points: 50,
     maxOccurrences: 1,
     sortOrder: 100
   },
   {
-    code: "UTILITY_MINOR_OUTSTANDING_DEBT",
-    name: "Minor outstanding debt",
-    description: "Only a minor utility debt is outstanding.",
-    points: 75,
+    code: UTILITY_MISSED_RULE_CODE,
+    name: "Utility missed",
+    description: "Utility payment was missed or remains unpaid beyond the grace period.",
+    points: 0,
     maxOccurrences: 1,
     sortOrder: 110
   },
   {
-    code: "UTILITY_SIGNIFICANT_OUTSTANDING_DEBT",
-    name: "Significant outstanding debt",
-    description: "A significant utility debt is outstanding.",
-    points: 25,
+    code: "PROPERTY_MAINTENANCE_EXCELLENT",
+    name: "Property maintenance: Excellent",
+    description: "Property maintenance was rated excellent.",
+    points: 100,
     maxOccurrences: 1,
     sortOrder: 120
   },
   {
-    code: "RENTAL_BEHAVIOUR_EXCELLENT",
-    name: "Rental behaviour: Excellent",
-    description: "Latest landlord maintenance and lease-compliance rating is Excellent.",
-    points: 200,
+    code: "PROPERTY_MAINTENANCE_GOOD",
+    name: "Property maintenance: Good",
+    description: "Property maintenance was rated good.",
+    points: 50,
     maxOccurrences: 1,
     sortOrder: 130
   },
   {
-    code: "RENTAL_BEHAVIOUR_GOOD",
-    name: "Rental behaviour: Good",
-    description: "Latest landlord maintenance and lease-compliance rating is Good.",
-    points: 150,
+    code: "PROPERTY_MAINTENANCE_POOR",
+    name: "Property maintenance: Poor",
+    description: "Property maintenance was rated poor.",
+    points: 0,
     maxOccurrences: 1,
     sortOrder: 140
   },
   {
-    code: "RENTAL_BEHAVIOUR_FAIR",
-    name: "Rental behaviour: Fair",
-    description: "Latest landlord maintenance and lease-compliance rating is Fair.",
+    code: "LEASE_COMPLIANCE_EXCELLENT",
+    name: "Lease compliance: Excellent",
+    description: "General lease compliance was rated excellent.",
     points: 100,
     maxOccurrences: 1,
     sortOrder: 150
   },
   {
-    code: "RENTAL_BEHAVIOUR_POOR",
-    name: "Rental behaviour: Poor",
-    description: "Latest landlord maintenance and lease-compliance rating is Poor.",
+    code: "LEASE_COMPLIANCE_GOOD",
+    name: "Lease compliance: Good",
+    description: "General lease compliance was rated good.",
     points: 50,
     maxOccurrences: 1,
     sortOrder: 160
   },
   {
-    code: DAMAGES_REPORTED_RULE_CODE,
-    name: "Damages reported",
-    description: "Penalty applied when landlord confirms damage or serious misuse reports.",
-    points: -100,
+    code: "LEASE_COMPLIANCE_POOR",
+    name: "Lease compliance: Poor",
+    description: "General lease compliance was rated poor.",
+    points: 0,
+    maxOccurrences: 1,
     sortOrder: 170
   },
   {
     code: "RENTAL_STABILITY_1_MOVE",
     name: "1 move in last 5 years",
     description: "Renter moved once within the last five years.",
-    points: 75,
+    points: 100,
     maxOccurrences: 1,
     sortOrder: 180
   },
@@ -203,73 +224,65 @@ const defaultRuleDefinitions: DefaultRuleDefinition[] = [
     code: "RENTAL_STABILITY_2_MOVES",
     name: "2 moves in last 5 years",
     description: "Renter moved twice within the last five years.",
-    points: 50,
+    points: 60,
     maxOccurrences: 1,
     sortOrder: 190
   },
   {
-    code: "RENTAL_STABILITY_3_MOVES",
-    name: "3 moves in last 5 years",
-    description: "Renter moved three times within the last five years.",
-    points: 35,
+    code: "RENTAL_STABILITY_3_PLUS_MOVES",
+    name: "3 or more moves in last 5 years",
+    description: "Renter moved three or more times within the last five years.",
+    points: 0,
     maxOccurrences: 1,
     sortOrder: 200
   },
   {
-    code: "RENTAL_STABILITY_4_MOVES",
-    name: "4 moves in last 5 years",
-    description: "Renter moved four times within the last five years.",
-    points: 25,
+    code: "EMPLOYED_1_YEAR",
+    name: "Employed for 1 year",
+    description: "Renter has been employed for 1 year.",
+    points: 100,
     maxOccurrences: 1,
     sortOrder: 210
   },
   {
-    code: "RENTAL_STABILITY_5_PLUS_MOVES",
-    name: "5 moves in last 5 years",
-    description: "Renter moved five or more times within the last five years.",
-    points: 10,
+    code: "EMPLOYED_2_YEARS",
+    name: "Employed for 2 years",
+    description: "Renter has been employed for 2 years.",
+    points: 60,
     maxOccurrences: 1,
     sortOrder: 220
   },
   {
-    code: "EMPLOYMENT_STABILITY_1_EMPLOYER",
-    name: "1 employer in last 5 years",
-    description: "Renter had one employer or business in the last five years.",
-    points: 75,
+    code: "EMPLOYED_3_PLUS_YEARS",
+    name: "Employed for 3 or more years",
+    description: "Renter has been employed for 3 or more years.",
+    points: 0,
     maxOccurrences: 1,
     sortOrder: 230
   },
   {
-    code: "EMPLOYMENT_STABILITY_2_EMPLOYERS",
-    name: "2 employers in last 5 years",
-    description: "Renter had two employers or businesses in the last five years.",
-    points: 50,
+    code: "SELF_EMPLOYED_5_PLUS_YEARS",
+    name: "Self employed for 5 or more years",
+    description: "Renter has been self employed for at least 5 years.",
+    points: 100,
     maxOccurrences: 1,
     sortOrder: 240
   },
   {
-    code: "EMPLOYMENT_STABILITY_3_EMPLOYERS",
-    name: "3 employers in last 5 years",
-    description: "Renter had three employers or businesses in the last five years.",
-    points: 35,
+    code: "SELF_EMPLOYED_3_TO_4_YEARS",
+    name: "Self employed for 3 to 4 years",
+    description: "Renter has been self employed for 3 to 4 years.",
+    points: 60,
     maxOccurrences: 1,
     sortOrder: 250
   },
   {
-    code: "EMPLOYMENT_STABILITY_4_EMPLOYERS",
-    name: "4 employers in last 5 years",
-    description: "Renter had four employers or businesses in the last five years.",
-    points: 25,
+    code: "SELF_EMPLOYED_UNDER_3_YEARS",
+    name: "Self employed for under 3 years",
+    description: "Renter has been self employed for less than 3 years.",
+    points: 0,
     maxOccurrences: 1,
     sortOrder: 260
-  },
-  {
-    code: "EMPLOYMENT_STABILITY_5_PLUS_EMPLOYERS",
-    name: "5+ employers in last 5 years",
-    description: "Renter had five or more employers or businesses in the last five years.",
-    points: 10,
-    maxOccurrences: 1,
-    sortOrder: 270
   },
   {
     code: "LANDLORD_REFERENCE_STRONGLY_RECOMMEND",
@@ -277,7 +290,7 @@ const defaultRuleDefinitions: DefaultRuleDefinition[] = [
     description: "Latest verified landlord reference is strongly recommend.",
     points: 100,
     maxOccurrences: 1,
-    sortOrder: 280
+    sortOrder: 270
   },
   {
     code: "LANDLORD_REFERENCE_RECOMMEND",
@@ -285,7 +298,7 @@ const defaultRuleDefinitions: DefaultRuleDefinition[] = [
     description: "Latest verified landlord reference is recommend.",
     points: 75,
     maxOccurrences: 1,
-    sortOrder: 290
+    sortOrder: 280
   },
   {
     code: "LANDLORD_REFERENCE_NEUTRAL",
@@ -293,7 +306,7 @@ const defaultRuleDefinitions: DefaultRuleDefinition[] = [
     description: "Latest verified landlord reference is neutral.",
     points: 40,
     maxOccurrences: 1,
-    sortOrder: 300
+    sortOrder: 290
   },
   {
     code: "LANDLORD_REFERENCE_DO_NOT_RECOMMEND",
@@ -301,55 +314,39 @@ const defaultRuleDefinitions: DefaultRuleDefinition[] = [
     description: "Latest verified landlord reference is do not recommend.",
     points: 0,
     maxOccurrences: 1,
-    sortOrder: 310
+    sortOrder: 300
   },
   {
     code: "RENTER_BAND_D",
     name: "Band D (< 500,000)",
     description: "Property rent amount falls below 500,000.",
-    points: 100,
+    points: 25,
     maxOccurrences: 1,
-    sortOrder: 320
+    sortOrder: 310
   },
   {
     code: "RENTER_BAND_C",
     name: "Band C (500,000 - 1M)",
     description: "Property rent amount falls between 500,000 and 1,000,000.",
-    points: 75,
+    points: 50,
     maxOccurrences: 1,
-    sortOrder: 330
+    sortOrder: 320
   },
   {
     code: "RENTER_BAND_B",
     name: "Band B (1M - 2.5M)",
     description: "Property rent amount falls between 1,000,000 and 2,500,000.",
-    points: 50,
+    points: 75,
     maxOccurrences: 1,
-    sortOrder: 340
+    sortOrder: 330
   },
   {
     code: "RENTER_BAND_A",
     name: "Band A (> 2.5M)",
     description: "Property rent amount is above 2,500,000.",
-    points: 25,
+    points: 100,
     maxOccurrences: 1,
-    sortOrder: 350
-  },
-  {
-    code: UTILITY_DISCONNECTION_RULE_CODE,
-    name: "Utility disconnection",
-    description: "Marker used when utility service was disconnected for non-payment.",
-    points: 0,
-    maxOccurrences: 1,
-    sortOrder: 360
-  },
-  {
-    code: RENT_DEFAULTED_RULE_CODE,
-    name: "Rent defaulted or evicted",
-    description: "Marker used when a renter defaults or is evicted.",
-    points: 0,
-    maxOccurrences: 1,
-    sortOrder: 370
+    sortOrder: 340
   }
 ];
 
@@ -404,6 +401,50 @@ function groupSchedulesByYear<T extends { dueDate: Date }>(items: T[]) {
   return grouped;
 }
 
+function latestRelevantSchedule(
+  schedules: Array<{
+    dueDate: Date;
+    status: string;
+    paidAt?: Date | null;
+    confirmedAt?: Date | null;
+    confirmedByRenterAt?: Date | null;
+  }>,
+  now: Date
+) {
+  return schedules
+    .filter((schedule) => schedule.status === "PAID" || schedule.dueDate <= now)
+    .sort((left, right) => right.dueDate.getTime() - left.dueDate.getTime())[0] ?? null;
+}
+
+function paymentScoreFromLatestSchedule(
+  schedule: {
+    dueDate: Date;
+    status: string;
+    paidAt?: Date | null;
+    confirmedAt?: Date | null;
+    confirmedByRenterAt?: Date | null;
+  } | null,
+  input: {
+    onTimePoints: number;
+    withinGracePoints: number;
+    gracePeriodDays: number;
+  }
+) {
+  if (!schedule || schedule.status !== "PAID") {
+    return 0;
+  }
+
+  const paidAt = schedule.paidAt ?? schedule.confirmedAt ?? schedule.confirmedByRenterAt;
+  if (!paidAt) {
+    return 0;
+  }
+
+  const daysLate = wholeDaysLate(schedule.dueDate, paidAt);
+  if (daysLate <= 0) return input.onTimePoints;
+  if (daysLate <= input.gracePeriodDays) return input.withinGracePoints;
+  return 0;
+}
+
 function getLatestEventByCodes(
   events: Array<{ occurredAt: Date; rule: { code: string; points: number; name: string } }>,
   codes: readonly string[]
@@ -441,21 +482,22 @@ function inferRuleCategoryCode(code: string): CategoryCode | null {
     [
       "RENT_PAID_ON_OR_BEFORE_DUE_DATE",
       "RENT_PAID_WITHIN_GRACE_PERIOD",
-      "RENT_PAID_31_TO_90_DAYS_LATE",
-      "RENT_PAID_OVER_90_DAYS_LATE",
-      "UTILITY_NO_OUTSTANDING_DEBT",
-      "UTILITY_MINOR_OUTSTANDING_DEBT",
-      "UTILITY_SIGNIFICANT_OUTSTANDING_DEBT",
+      RENT_MISSED_RULE_CODE,
+      "UTILITY_PAID_ON_TIME",
+      "UTILITY_PAID_WITHIN_GRACE_PERIOD",
+      UTILITY_MISSED_RULE_CODE,
       "RENT_PAYMENT_HISTORY",
-      "UTILITY_PAYMENT_HISTORY",
-      UTILITY_DISCONNECTION_RULE_CODE,
-      RENT_DEFAULTED_RULE_CODE
+      "UTILITY_PAYMENT_HISTORY"
     ].includes(code)
   ) {
     return "PAYMENT";
   }
 
-  if ([...RENT_BEHAVIOUR_RATING_CODES, DAMAGES_REPORTED_RULE_CODE].includes(code as (typeof RENT_BEHAVIOUR_RATING_CODES)[number] | typeof DAMAGES_REPORTED_RULE_CODE)) {
+  if (
+    [...PROPERTY_MAINTENANCE_RATING_CODES, ...LEASE_COMPLIANCE_RATING_CODES].includes(
+      code as (typeof PROPERTY_MAINTENANCE_RATING_CODES)[number] | (typeof LEASE_COMPLIANCE_RATING_CODES)[number]
+    )
+  ) {
     return "RENTER_BEHAVIOUR";
   }
 
@@ -464,9 +506,7 @@ function inferRuleCategoryCode(code: string): CategoryCode | null {
       "RENTAL_STABILITY",
       "RENTAL_STABILITY_1_MOVE",
       "RENTAL_STABILITY_2_MOVES",
-      "RENTAL_STABILITY_3_MOVES",
-      "RENTAL_STABILITY_4_MOVES",
-      "RENTAL_STABILITY_5_PLUS_MOVES"
+      "RENTAL_STABILITY_3_PLUS_MOVES"
     ].includes(code)
   ) {
     return "RENTAL_STABILITY";
@@ -475,11 +515,12 @@ function inferRuleCategoryCode(code: string): CategoryCode | null {
   if (
     [
       "EMPLOYMENT_STABILITY",
-      "EMPLOYMENT_STABILITY_1_EMPLOYER",
-      "EMPLOYMENT_STABILITY_2_EMPLOYERS",
-      "EMPLOYMENT_STABILITY_3_EMPLOYERS",
-      "EMPLOYMENT_STABILITY_4_EMPLOYERS",
-      "EMPLOYMENT_STABILITY_5_PLUS_EMPLOYERS"
+      "EMPLOYED_1_YEAR",
+      "EMPLOYED_2_YEARS",
+      "EMPLOYED_3_PLUS_YEARS",
+      "SELF_EMPLOYED_5_PLUS_YEARS",
+      "SELF_EMPLOYED_3_TO_4_YEARS",
+      "SELF_EMPLOYED_UNDER_3_YEARS"
     ].includes(code)
   ) {
     return "EMPLOYMENT_STABILITY";
@@ -510,15 +551,12 @@ function calculateConfiguredCategoryPoints(
     const rentCodes = [
       "RENT_PAID_ON_OR_BEFORE_DUE_DATE",
       "RENT_PAID_WITHIN_GRACE_PERIOD",
-      "RENT_PAID_31_TO_90_DAYS_LATE",
-      "RENT_PAID_OVER_90_DAYS_LATE",
-      RENT_DEFAULTED_RULE_CODE
+      RENT_MISSED_RULE_CODE
     ];
     const utilityCodes = [
-      "UTILITY_NO_OUTSTANDING_DEBT",
-      "UTILITY_MINOR_OUTSTANDING_DEBT",
-      "UTILITY_SIGNIFICANT_OUTSTANDING_DEBT",
-      UTILITY_DISCONNECTION_RULE_CODE
+      "UTILITY_PAID_ON_TIME",
+      "UTILITY_PAID_WITHIN_GRACE_PERIOD",
+      UTILITY_MISSED_RULE_CODE
     ];
 
     const maxRent = activeRules
@@ -532,11 +570,13 @@ function calculateConfiguredCategoryPoints(
   }
 
   if (categoryCode === "RENTER_BEHAVIOUR") {
-    const ratingCodes = [...RENT_BEHAVIOUR_RATING_CODES];
-    const maxRating = activeRules
-      .filter((rule) => ratingCodes.includes(rule.code as (typeof RENT_BEHAVIOUR_RATING_CODES)[number]))
+    const maintenanceMax = activeRules
+      .filter((rule) => PROPERTY_MAINTENANCE_RATING_CODES.includes(rule.code as (typeof PROPERTY_MAINTENANCE_RATING_CODES)[number]))
       .reduce((max, rule) => Math.max(max, rule.points), 0);
-    return Math.max(maxRating, 0);
+    const complianceMax = activeRules
+      .filter((rule) => LEASE_COMPLIANCE_RATING_CODES.includes(rule.code as (typeof LEASE_COMPLIANCE_RATING_CODES)[number]))
+      .reduce((max, rule) => Math.max(max, rule.points), 0);
+    return Math.max(maintenanceMax, 0) + Math.max(complianceMax, 0);
   }
 
   return activeRules.reduce((max, rule) => Math.max(max, rule.points), 0);
@@ -591,56 +631,94 @@ async function fetchPolicyWithRules(tx: DbClient) {
 export async function ensureDefaultRentScorePolicy(tx: DbClient = prisma) {
   const policy = await tx.rentScorePolicy.upsert({
     where: { code: DEFAULT_POLICY_CODE },
-    update: {},
+    update: {
+      name: "Rent score default policy",
+      description: "Default RentSure rent score policy for renters.",
+      minScore: 0,
+      maxScore: 1000,
+      isActive: true
+    },
     create: {
       code: DEFAULT_POLICY_CODE,
       name: "Rent score default policy",
       description: "Default RentSure rent score policy for renters.",
       minScore: 0,
-      maxScore: 900,
+      maxScore: 1000,
       isActive: true
     }
   });
 
-  const existingRules = await tx.rentScoreRule.findMany({
-    where: { policyId: policy.id },
-    select: { code: true }
-  });
-  const existingCategories = await tx.rentScoreCategoryConfig.findMany({
-    where: { policyId: policy.id },
-    select: { code: true }
-  });
+  await Promise.all(
+    DEFAULT_CATEGORY_DEFINITIONS.map((category) =>
+      tx.rentScoreCategoryConfig.upsert({
+        where: {
+          policyId_code: {
+            policyId: policy.id,
+            code: category.code
+          }
+        },
+        update: {
+          name: category.name,
+          maxScore: category.maxScore,
+          sortOrder: category.sortOrder,
+          isActive: true
+        },
+        create: {
+          policyId: policy.id,
+          code: category.code,
+          name: category.name,
+          maxScore: category.maxScore,
+          sortOrder: category.sortOrder,
+          isActive: true
+        }
+      })
+    )
+  );
 
-  const existingCodes = new Set(existingRules.map((rule: { code: string }) => rule.code));
-  const existingCategoryCodes = new Set(existingCategories.map((category: { code: string }) => category.code));
-  const missingRules = defaultRuleDefinitions.filter((rule) => !existingCodes.has(rule.code));
-  const missingCategories = DEFAULT_CATEGORY_DEFINITIONS.filter((category) => !existingCategoryCodes.has(category.code));
+  await Promise.all(
+    defaultRuleDefinitions.map((rule) =>
+      tx.rentScoreRule.upsert({
+        where: {
+          policyId_code: {
+            policyId: policy.id,
+            code: rule.code
+          }
+        },
+        update: {
+          name: rule.name,
+          description: rule.description,
+          points: rule.points,
+          maxOccurrences: rule.maxOccurrences ?? null,
+          sortOrder: rule.sortOrder,
+          metadata: rule.metadata,
+          isActive: true
+        },
+        create: {
+          policyId: policy.id,
+          code: rule.code,
+          name: rule.name,
+          description: rule.description,
+          points: rule.points,
+          maxOccurrences: rule.maxOccurrences ?? null,
+          sortOrder: rule.sortOrder,
+          metadata: rule.metadata,
+          isActive: true
+        }
+      })
+    )
+  );
 
-  if (missingRules.length > 0) {
-    await tx.rentScoreRule.createMany({
-      data: missingRules.map((rule) => ({
+  if (LEGACY_RULE_CODES.length > 0) {
+    await tx.rentScoreRule.updateMany({
+      where: {
         policyId: policy.id,
-        code: rule.code,
-        name: rule.name,
-        description: rule.description,
-        points: rule.points,
-        maxOccurrences: rule.maxOccurrences ?? null,
-        sortOrder: rule.sortOrder,
-        metadata: rule.metadata
-      }))
-    });
-  }
-
-  if (missingCategories.length > 0) {
-    await tx.rentScoreCategoryConfig.createMany({
-      data: missingCategories.map((category) => ({
-        policyId: policy.id,
-        code: category.code,
-        name: category.name,
-        maxScore: category.maxScore,
-        sortOrder: category.sortOrder,
-        isActive: true
-      }))
+        code: {
+          in: [...LEGACY_RULE_CODES]
+        }
+      },
+      data: {
+        isActive: false
+      }
     });
   }
 
@@ -810,104 +888,77 @@ export async function buildRentScoreSnapshot(publicAccountId: string, tx: DbClie
   ];
   const identityScore = identityBreakdown.reduce((sum, item) => sum + item.contribution, 0);
 
-  const rentDefaulted = hasEventCode(events, RENT_DEFAULTED_RULE_CODE);
-  const rentSchedulesByYear = groupSchedulesByYear(rentSchedules);
-  const yearlyRentScores = Array.from(rentSchedulesByYear.entries())
-    .sort(([left], [right]) => right - left)
-    .slice(0, 5)
-    .map(([year, schedules]) => {
-      const overdueUnpaid = schedules.some((schedule: any) => schedule.status !== "PAID" && schedule.dueDate < now);
-      let score = 0;
-
-      if (rentDefaulted || overdueUnpaid) {
-        score = 0;
-      } else if (schedules.length > 0) {
-        const avgDaysLate =
-          schedules.reduce((sum: number, schedule: any) => {
-            const paidAt = schedule.paidAt ?? schedule.confirmedAt ?? schedule.confirmedByRenterAt ?? schedule.dueDate;
-            return sum + wholeDaysLate(schedule.dueDate, paidAt);
-          }, 0) / schedules.length;
-
-        if (avgDaysLate <= 0) score = 150;
-        else if (avgDaysLate <= 30) score = 100;
-        else if (avgDaysLate <= 90) score = 75;
-        else score = 50;
-      }
-
-      return { year, score, scheduleCount: schedules.length };
-    });
-
-  const rentPaymentScore =
-    yearlyRentScores.length > 0 ? Math.round(yearlyRentScores.reduce((sum, item) => sum + item.score, 0) / yearlyRentScores.length) : 0;
-
-  const utilityDisconnected = hasEventCode(events, UTILITY_DISCONNECTION_RULE_CODE);
-  const outstandingUtilitySchedules = utilitySchedules.filter((schedule: any) => schedule.status !== "PAID" && schedule.dueDate < now);
-  const utilityPaymentScore = utilityDisconnected ? 0 : outstandingUtilitySchedules.length === 0 ? 100 : outstandingUtilitySchedules.length === 1 ? 75 : 25;
+  const latestRentSchedule = latestRelevantSchedule(rentSchedules, now);
+  const latestUtilitySchedule = latestRelevantSchedule(utilitySchedules, now);
+  const rentPaymentScore = paymentScoreFromLatestSchedule(latestRentSchedule, {
+    onTimePoints: 200,
+    withinGracePoints: 150,
+    gracePeriodDays: 60
+  });
+  const utilityPaymentScore = paymentScoreFromLatestSchedule(latestUtilitySchedule, {
+    onTimePoints: 100,
+    withinGracePoints: 50,
+    gracePeriodDays: 60
+  });
 
   const paymentBreakdown = [
     {
       ruleId: "category:payment:rent",
       code: "RENT_PAYMENT_HISTORY",
       name: "Payment of rent",
-      description: "Average yearly rent-payment performance across available history.",
-      points: 150,
+      description: "Latest rent payment status based on due date and grace period.",
+      points: 200,
       maxOccurrences: 1,
       isActive: true,
-      quantity: yearlyRentScores.length,
-      appliedOccurrences: yearlyRentScores.length > 0 ? 1 : 0,
+      quantity: latestRentSchedule ? 1 : 0,
+      appliedOccurrences: latestRentSchedule ? 1 : 0,
       contribution: rentPaymentScore,
-      lastOccurredAt: rentSchedules[0]?.dueDate ?? null,
-      metadata: {
-        yearlyScores: yearlyRentScores
-      } satisfies Prisma.JsonObject
+      lastOccurredAt: latestRentSchedule?.dueDate ?? null
     },
     {
       ruleId: "category:payment:utility",
       code: "UTILITY_PAYMENT_HISTORY",
       name: "Utility payment",
-      description: "Outstanding utility debt status derived from confirmed utility schedules.",
+      description: "Latest utility payment status based on due date and grace period.",
       points: 100,
       maxOccurrences: 1,
       isActive: true,
-      quantity: utilitySchedules.length,
-      appliedOccurrences: utilitySchedules.length > 0 ? 1 : 0,
+      quantity: latestUtilitySchedule ? 1 : 0,
+      appliedOccurrences: latestUtilitySchedule ? 1 : 0,
       contribution: utilityPaymentScore,
-      lastOccurredAt: utilitySchedules[0]?.dueDate ?? null
+      lastOccurredAt: latestUtilitySchedule?.dueDate ?? null
     }
   ];
 
-  const latestBehaviourEvent = getLatestEventByCodes(events, RENT_BEHAVIOUR_RATING_CODES);
-  const behaviourBaseScore = latestBehaviourEvent ? latestBehaviourEvent.rule.points : 0;
-  const damagesReported = hasEventCode(events, DAMAGES_REPORTED_RULE_CODE);
-  const damagesPenalty = damagesReported ? -100 : 0;
-  const rentalBehaviourScore = behaviourBaseScore + damagesPenalty;
+  const latestPropertyMaintenanceEvent = getLatestEventByCodes(events, PROPERTY_MAINTENANCE_RATING_CODES);
+  const latestLeaseComplianceEvent = getLatestEventByCodes(events, LEASE_COMPLIANCE_RATING_CODES);
 
   const behaviourBreakdown = [
     {
-      ruleId: "category:behaviour:rating",
-      code: latestBehaviourEvent?.rule.code ?? "RENTAL_BEHAVIOUR_UNSET",
-      name: "Rental behaviour rating",
-      description: "Latest landlord maintenance and lease-compliance rating.",
-      points: 200,
+      ruleId: "category:behaviour:property-maintenance",
+      code: latestPropertyMaintenanceEvent?.rule.code ?? "PROPERTY_MAINTENANCE_UNSET",
+      name: "Property maintenance",
+      description: "Latest landlord property maintenance rating.",
+      points: 100,
       maxOccurrences: 1,
       isActive: true,
-      quantity: latestBehaviourEvent ? 1 : 0,
-      appliedOccurrences: latestBehaviourEvent ? 1 : 0,
-      contribution: behaviourBaseScore,
-      lastOccurredAt: latestBehaviourEvent?.occurredAt ?? null
+      quantity: latestPropertyMaintenanceEvent ? 1 : 0,
+      appliedOccurrences: latestPropertyMaintenanceEvent ? 1 : 0,
+      contribution: latestPropertyMaintenanceEvent?.rule.points ?? 0,
+      lastOccurredAt: latestPropertyMaintenanceEvent?.occurredAt ?? null
     },
     {
-      ruleId: "category:behaviour:damages",
-      code: DAMAGES_REPORTED_RULE_CODE,
-      name: "Damages reported",
-      description: "Penalty from confirmed damage or serious misuse reports.",
-      points: -100,
-      maxOccurrences: null,
+      ruleId: "category:behaviour:lease-compliance",
+      code: latestLeaseComplianceEvent?.rule.code ?? "LEASE_COMPLIANCE_UNSET",
+      name: "General lease compliance",
+      description: "Latest landlord lease compliance rating.",
+      points: 100,
+      maxOccurrences: 1,
       isActive: true,
-      quantity: damagesReported ? 1 : 0,
-      appliedOccurrences: damagesReported ? 1 : 0,
-      contribution: damagesPenalty,
-      lastOccurredAt: events.find((event: any) => event.rule.code === DAMAGES_REPORTED_RULE_CODE)?.occurredAt ?? null
+      quantity: latestLeaseComplianceEvent ? 1 : 0,
+      appliedOccurrences: latestLeaseComplianceEvent ? 1 : 0,
+      contribution: latestLeaseComplianceEvent?.rule.points ?? 0,
+      lastOccurredAt: latestLeaseComplianceEvent?.occurredAt ?? null
     }
   ];
 
@@ -915,27 +966,25 @@ export async function buildRentScoreSnapshot(publicAccountId: string, tx: DbClie
     account.residenceMoveCount5y == null
       ? 0
       : account.residenceMoveCount5y <= 1
-        ? 75
+        ? 100
         : account.residenceMoveCount5y === 2
-          ? 50
-          : account.residenceMoveCount5y === 3
-            ? 35
-            : account.residenceMoveCount5y === 4
-              ? 25
-              : 10;
+          ? 60
+          : 0;
 
   const employmentStabilityScore =
-    account.employerCount5y == null
+    account.employmentType == null || account.employmentYears == null
       ? 0
-      : account.employerCount5y <= 1
-        ? 75
-        : account.employerCount5y === 2
-          ? 50
-          : account.employerCount5y === 3
-            ? 35
-            : account.employerCount5y === 4
-              ? 25
-              : 10;
+      : account.employmentType === "EMPLOYED"
+        ? account.employmentYears <= 1
+          ? 100
+          : account.employmentYears === 2
+            ? 60
+            : 0
+        : account.employmentYears >= 5
+          ? 100
+          : account.employmentYears >= 3
+            ? 60
+            : 0;
 
   const latestLandlordReferenceEvent = getLatestEventByCodes(events, LANDLORD_REFERENCE_CODES);
   const landlordReferenceScore = latestLandlordReferenceEvent ? latestLandlordReferenceEvent.rule.points : 0;
@@ -946,12 +995,12 @@ export async function buildRentScoreSnapshot(publicAccountId: string, tx: DbClie
     annualRentAmountNgn == null
       ? 0
       : annualRentAmountNgn < 500_000
-        ? 100
+        ? 25
         : annualRentAmountNgn <= 1_000_000
-          ? 75
+          ? 50
           : annualRentAmountNgn <= 2_500_000
-            ? 50
-            : 25;
+            ? 75
+            : 100;
 
   const baseBreakdown = [
     ...identityBreakdown.map((item) => ({ ...item, categoryCode: "IDENTITY_VERIFICATION" as const })),
@@ -963,7 +1012,7 @@ export async function buildRentScoreSnapshot(publicAccountId: string, tx: DbClie
       categoryCode: "RENTAL_STABILITY" as const,
       name: "Rental stability",
       description: "Number of moves supplied for the last five years.",
-      points: 75,
+      points: 100,
       maxOccurrences: 1,
       isActive: true,
       quantity: account.residenceMoveCount5y ?? 0,
@@ -976,14 +1025,14 @@ export async function buildRentScoreSnapshot(publicAccountId: string, tx: DbClie
       code: "EMPLOYMENT_STABILITY",
       categoryCode: "EMPLOYMENT_STABILITY" as const,
       name: "Employment / business stability",
-      description: "Number of employers or businesses supplied for the last five years.",
-      points: 75,
+      description: "Employment type and years supplied on the renter profile.",
+      points: 100,
       maxOccurrences: 1,
       isActive: true,
-      quantity: account.employerCount5y ?? 0,
-      appliedOccurrences: account.employerCount5y == null ? 0 : 1,
+      quantity: account.employmentYears ?? 0,
+      appliedOccurrences: account.employmentType == null || account.employmentYears == null ? 0 : 1,
       contribution: employmentStabilityScore,
-      lastOccurredAt: account.employerCount5y == null ? null : account.updatedAt
+      lastOccurredAt: account.employmentType == null || account.employmentYears == null ? null : account.updatedAt
     },
     {
       ruleId: "category:landlord-reference",
@@ -1644,28 +1693,50 @@ export async function ensureSingleRentScoreEvent(publicAccountId: string, ruleCo
 
 export async function syncUtilityPaymentHistoryEvent(publicAccountId: string, tx: DbClient = prisma) {
   const now = new Date();
-  const outstandingUtilitySchedules = await tx.paymentSchedule.count({
+  const schedules = await tx.paymentSchedule.findMany({
     where: {
       paymentType: "UTILITY",
-      status: { not: "PAID" },
-      dueDate: { lt: now },
       proposedRenter: {
         renterAccountId: publicAccountId
       }
+    },
+    orderBy: { dueDate: "desc" },
+    select: {
+      dueDate: true,
+      status: true,
+      paidAt: true,
+      confirmedAt: true,
+      confirmedByRenterAt: true
     }
   });
 
+  const latestSchedule = latestRelevantSchedule(schedules, now);
+  if (!latestSchedule) {
+    return replaceRentScoreEventsByCodes({
+      publicAccountId,
+      tx,
+      codes: ["UTILITY_PAID_ON_TIME", "UTILITY_PAID_WITHIN_GRACE_PERIOD", UTILITY_MISSED_RULE_CODE],
+      newEvent: null
+    });
+  }
+
+  const daysLate = latestSchedule.status === "PAID"
+    ? wholeDaysLate(latestSchedule.dueDate, latestSchedule.paidAt ?? latestSchedule.confirmedAt ?? latestSchedule.confirmedByRenterAt ?? latestSchedule.dueDate)
+    : Infinity;
+
   const nextRuleCode =
-    outstandingUtilitySchedules === 0
-      ? "UTILITY_NO_OUTSTANDING_DEBT"
-      : outstandingUtilitySchedules === 1
-        ? "UTILITY_MINOR_OUTSTANDING_DEBT"
-        : "UTILITY_SIGNIFICANT_OUTSTANDING_DEBT";
+    latestSchedule.status !== "PAID"
+      ? UTILITY_MISSED_RULE_CODE
+      : daysLate <= 0
+        ? "UTILITY_PAID_ON_TIME"
+        : daysLate <= 60
+          ? "UTILITY_PAID_WITHIN_GRACE_PERIOD"
+          : UTILITY_MISSED_RULE_CODE;
 
   return replaceRentScoreEventsByCodes({
     publicAccountId,
     tx,
-    codes: [...UTILITY_PAYMENT_STATE_CODES],
+    codes: ["UTILITY_PAID_ON_TIME", "UTILITY_PAID_WITHIN_GRACE_PERIOD", UTILITY_MISSED_RULE_CODE],
     newEvent: {
       ruleCode: nextRuleCode,
       occurredAt: now,

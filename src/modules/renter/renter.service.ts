@@ -426,7 +426,8 @@ export async function getRenterDashboard(publicAccountId: string) {
       city: account.city,
       address: account.address,
       residenceMoveCount5y: account.residenceMoveCount5y,
-      employerCount5y: account.employerCount5y,
+      employmentType: account.employmentType,
+      employmentYears: account.employmentYears,
       notes: account.notes,
       nin: null,
       ninVerifiedAt: account.ninVerifiedAt,
@@ -590,7 +591,8 @@ export async function updateRenterProfile(input: {
   city?: string;
   address?: string;
   residenceMoveCount5y?: number | null;
-  employerCount5y?: number | null;
+  employmentType?: "EMPLOYED" | "SELF_EMPLOYED" | null;
+  employmentYears?: number | null;
   notes?: string | null;
 }) {
   await getRenterAccount(input.publicAccountId);
@@ -607,7 +609,8 @@ export async function updateRenterProfile(input: {
       city: input.city?.trim(),
       address: input.address?.trim(),
       residenceMoveCount5y: input.residenceMoveCount5y === undefined ? undefined : input.residenceMoveCount5y,
-      employerCount5y: input.employerCount5y === undefined ? undefined : input.employerCount5y,
+      employmentType: input.employmentType === undefined ? undefined : input.employmentType,
+      employmentYears: input.employmentYears === undefined ? undefined : input.employmentYears,
       notes: input.notes === undefined ? undefined : input.notes?.trim() || null
     }
   });
@@ -740,6 +743,14 @@ export async function initiateRenterPaymentConfirmation(input: {
 
   if (!schedule) {
     throw new AppError("Approved linked property unit payment schedule not found", 404, "PAYMENT_SCHEDULE_NOT_FOUND");
+  }
+
+  if (schedule.confirmationInitiatedAt) {
+    throw new AppError(
+      "Proof of payment has already been submitted for this payment request. Start a new payment if you need to send another proof.",
+      400,
+      "PAYMENT_PROOF_ALREADY_SUBMITTED"
+    );
   }
 
   if (!input.paymentEvidenceObjectKey && !schedule.paymentEvidenceObjectKey) {

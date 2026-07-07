@@ -382,10 +382,6 @@ export async function saveLocalPublicDocumentUpload(input: {
   fileSize: number;
   base64Data: string;
 }) {
-  if (process.env.NODE_ENV === "production") {
-    throw new AppError("Local document uploads are disabled in production. Configure S3 storage to continue.", 503, "STORAGE_NOT_CONFIGURED");
-  }
-
   assertValidDocumentUpload({
     documentType: input.documentType,
     contentType: input.contentType,

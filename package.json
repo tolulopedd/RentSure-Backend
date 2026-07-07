@@ -12,7 +12,8 @@
     "lint": "tsc --noEmit",
     "prisma:gen": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
-    "reset:non-user-data": "ts-node-dev --exit-child --transpile-only src/scripts/reset-non-user-data.ts"
+    "reset:non-user-data": "ts-node-dev --exit-child --transpile-only src/scripts/reset-non-user-data.ts",
+    "smoke:readiness": "ts-node-dev --exit-child --transpile-only src/scripts/smoke-readiness.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.19.2",

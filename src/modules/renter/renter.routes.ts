@@ -33,7 +33,8 @@ const updateProfileSchema = z.object({
   city: z.string().trim().min(2).optional(),
   address: z.string().trim().min(5).optional(),
   residenceMoveCount5y: z.number().int().min(1).max(5).optional().nullable(),
-  employerCount5y: z.number().int().min(1).max(20).optional().nullable(),
+  employmentType: z.enum(["EMPLOYED", "SELF_EMPLOYED"]).optional().nullable(),
+  employmentYears: z.number().int().min(1).max(60).optional().nullable(),
   notes: z.string().trim().max(500).optional().nullable()
 });
 

@@ -148,8 +148,8 @@ const commentSchema = z.object({
 });
 
 const behaviourReviewSchema = z.object({
-  rating: z.enum(["EXCELLENT", "GOOD", "FAIR", "POOR"]),
-  damagesReported: z.boolean().optional(),
+  propertyMaintenanceRating: z.enum(["EXCELLENT", "GOOD", "POOR"]),
+  leaseComplianceRating: z.enum(["EXCELLENT", "GOOD", "POOR"]),
   note: z.string().trim().max(500).optional(),
   complaints: z.array(z.string().trim().min(1).max(120)).max(10).optional()
 });
@@ -437,8 +437,8 @@ router.post("/workspace/queue/:proposedRenterId/behaviour-review", async (req, r
     const result = await submitWorkspaceRenterBehaviourReview({
       publicAccountId: req.user!.userId,
       proposedRenterId: params.proposedRenterId,
-      rating: body.rating,
-      damagesReported: body.damagesReported,
+      propertyMaintenanceRating: body.propertyMaintenanceRating,
+      leaseComplianceRating: body.leaseComplianceRating,
       note: body.note,
       complaints: body.complaints
     });
