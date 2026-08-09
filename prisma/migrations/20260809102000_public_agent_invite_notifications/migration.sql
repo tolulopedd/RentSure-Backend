@@ -1,0 +1,1 @@
+ALTER TYPE "PublicNotificationType" ADD VALUE IF NOT EXISTS 'AGENT_INVITE';

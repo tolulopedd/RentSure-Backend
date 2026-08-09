@@ -1,8 +1,10 @@
 import type {
+  PaymentConfirmationOutcome,
   LandlordReferenceRecommendation,
   PaymentScheduleStatus,
   PaymentScheduleType,
   Prisma,
+  PropertyAgentInviteStatus,
   PropertyMemberRole,
   PublicAccount,
   PublicAccountType
@@ -156,6 +158,11 @@ function buildRenterInviteUrl(email: string) {
   return `${base}/signup?track=RENTER&email=${encodeURIComponent(email)}`;
 }
 
+function buildAgentInviteUrl(email: string) {
+  const base = env.APP_WEB_BASE_URL.replace(/\/+$/, "");
+  return `${base}/signup?track=AGENT&email=${encodeURIComponent(email)}`;
+}
+
 function buildAppUrl(path: string) {
   const base = env.APP_WEB_BASE_URL.replace(/\/+$/, "");
   return `${base}${path.startsWith("/") ? path : `/${path}`}`;
@@ -228,6 +235,48 @@ async function notifyRenterOfDecision(input: {
       ctaUrl: openAccountUrl
     })
   });
+}
+
+async function notifyInvitedAgent(input: {
+  landlordName: string;
+  propertySummaryLabel: string;
+  propertyAddress: string;
+  agentEmail: string;
+}) {
+  const inviteUrl = buildAgentInviteUrl(input.agentEmail);
+  const delivery = await sendTransactionalMail({
+    category: "AGENT_INVITE",
+    to: input.agentEmail,
+    subject: "You’ve been invited to join RentSure as an agent",
+    html: renderTransactionalEmail({
+      eyebrow: "Agent Invite",
+      title: "Complete your agent account setup",
+      greeting: "Hello,",
+      paragraphs: [
+        `You have been invited by <strong>${input.landlordName}</strong> to manage <strong>${input.propertySummaryLabel}</strong> in RentSure.`,
+        `Property address: <strong>${input.propertyAddress}</strong>.`,
+        "Create your RentSure agent account to access the property workspace and continue from there."
+      ],
+      ctaLabel: "Create agent account",
+      ctaUrl: inviteUrl
+    })
+  });
+
+  logger.info(
+    {
+      event: "workspace.agent_invite",
+      agentEmail: input.agentEmail,
+      property: input.propertySummaryLabel,
+      previewUrl: delivery.previewUrl || null,
+      deliveryMode: delivery.deliveryMode
+    },
+    "Agent invite generated"
+  );
+
+  return {
+    inviteUrl,
+    invitePreviewUrl: delivery.previewUrl || undefined
+  };
 }
 
 function isMissingProposedRenterPropertyUnitColumn(error: unknown) {
@@ -380,6 +429,56 @@ async function listLinkedWorkspaceAccounts(publicAccountId: string, tx: DbClient
   }
 
   return Array.from(linkedById.values()).sort((left, right) => left.name.localeCompare(right.name));
+}
+
+async function listPendingWorkspaceAgentInvites(publicAccountId: string, tx: DbClient = prisma) {
+  const account = await getWorkspaceAccount(publicAccountId, tx);
+  if (account.accountType !== "AGENT") return [];
+
+  const invites = await tx.propertyAgentInvite.findMany({
+    where: {
+      status: "PENDING",
+      OR: [{ recipientAccountId: publicAccountId }, { recipientEmail: account.email }]
+    },
+    include: {
+      property: true,
+      invitedBy: true
+    },
+    orderBy: [{ createdAt: "desc" }]
+  });
+
+  return invites.map((invite) => ({
+    id: invite.id,
+    status: invite.status,
+    recipientEmail: invite.recipientEmail,
+    createdAt: invite.createdAt,
+    property: {
+      id: invite.property.id,
+      name: invite.property.name,
+      summaryLabel: propertySummary(invite.property),
+      address: invite.property.address,
+      city: invite.property.city,
+      state: invite.property.state
+    },
+    invitedBy: {
+      id: invite.invitedBy.id,
+      name: publicAccountDisplayName(invite.invitedBy),
+      email: invite.invitedBy.email
+    }
+  }));
+}
+
+async function getAcceptedPropertyAgentInvite(propertyId: string, tx: DbClient = prisma) {
+  return tx.propertyAgentInvite.findFirst({
+    where: {
+      propertyId,
+      status: "ACCEPTED"
+    },
+    include: {
+      recipientAccount: true
+    },
+    orderBy: [{ respondedAt: "desc" }, { updatedAt: "desc" }]
+  });
 }
 
 async function getPropertyMembership(publicAccountId: string, propertyId: string, tx: DbClient = prisma) {
@@ -592,7 +691,7 @@ async function logProposedRenterActivity(input: {
 
 async function createPublicAccountNotification(input: {
   publicAccountId: string;
-  notificationType: "PROPERTY_LINKED";
+  notificationType: "AGENT_INVITE" | "PROPERTY_LINKED" | "PROPERTY_LINK_RESPONSE" | "PAYMENT_UPDATE";
   title: string;
   message: string;
   ctaLabel?: string;
@@ -604,13 +703,48 @@ async function createPublicAccountNotification(input: {
   await client.publicAccountNotification.create({
     data: {
       publicAccountId: input.publicAccountId,
-      notificationType: input.notificationType,
+      notificationType: input.notificationType as any,
       title: input.title,
       message: input.message,
       ctaLabel: input.ctaLabel ?? null,
       ctaPath: input.ctaPath ?? null,
       metadata: input.metadata
     }
+  });
+}
+
+async function notifyRenterOfPaymentReview(input: {
+  renterAccountId: string;
+  paymentType: PaymentScheduleType;
+  propertyName: string;
+  propertyUnitLabel?: string | null;
+  outcome: PaymentConfirmationOutcome;
+  tx?: DbClient;
+}) {
+  const paymentLabel = input.paymentType.replaceAll("_", " ").toLowerCase();
+  const locationLabel = input.propertyUnitLabel?.trim()
+    ? `${input.propertyName} (${input.propertyUnitLabel.trim()})`
+    : input.propertyName;
+
+  const message =
+    input.outcome === "FULL"
+      ? `Your ${paymentLabel} proof for ${locationLabel} was confirmed in full. Your rent score has been updated.`
+      : `Your ${paymentLabel} proof for ${locationLabel} was marked as partial. Your rent score has been updated. Start a new payment if you need to send the balance.`;
+
+  await createPublicAccountNotification({
+    publicAccountId: input.renterAccountId,
+    notificationType: "PAYMENT_UPDATE",
+    title: input.outcome === "FULL" ? "Payment confirmed" : "Payment marked partial",
+    message,
+    ctaLabel: "Open payments",
+    ctaPath: "/account/renter/payments",
+    metadata: {
+      paymentType: input.paymentType,
+      propertyName: input.propertyName,
+      propertyUnitLabel: input.propertyUnitLabel ?? null,
+      outcome: input.outcome
+    } as Prisma.JsonObject,
+    tx: input.tx
   });
 }
 
@@ -626,7 +760,7 @@ async function notifyProposedRenter(input: {
   tx?: DbClient;
 }) {
   const isExistingMember = Boolean(input.existingAccountId);
-  const actionPath = isExistingMember ? "/account/renter/queue" : `/signup?track=RENTER&email=${encodeURIComponent(input.renterEmail)}`;
+  const actionPath = isExistingMember ? "/account/renter/cases" : `/signup?track=RENTER&email=${encodeURIComponent(input.renterEmail)}`;
   const actionUrl = buildAppUrl(actionPath);
   const linkedByAgent = input.requestedByAccountType === "AGENT";
   const greetingName = input.renterName || "there";
@@ -667,8 +801,8 @@ async function notifyProposedRenter(input: {
       message: linkedByAgent
         ? `${input.requestedByName} linked you to ${input.propertyAddress}. You will be informed when the landlord makes a decision.`
         : `You have been linked to ${input.propertyAddress}. You will be notified when the landlord makes a decision.`,
-      ctaLabel: "Open account",
-      ctaPath: "/account/renter/queue",
+      ctaLabel: "Open",
+      ctaPath: "/account/renter/cases",
       metadata: {
         propertySummaryLabel: input.propertySummaryLabel,
         propertyAddress: input.propertyAddress,
@@ -855,11 +989,28 @@ export async function getWorkspaceProfile(publicAccountId: string) {
     throw new AppError("Workspace account not found", 404, "WORKSPACE_ACCOUNT_NOT_FOUND");
   }
 
-  const linkedAccounts = await listLinkedWorkspaceAccounts(publicAccountId);
+  const [linkedAccounts, notifications] = await Promise.all([
+    listLinkedWorkspaceAccounts(publicAccountId),
+    prisma.publicAccountNotification.findMany({
+      where: { publicAccountId },
+      orderBy: [{ readAt: "asc" }, { createdAt: "desc" }],
+      take: 10
+    })
+  ]);
 
   return {
     ...toWorkspaceProfilePayload(account),
-    linkedAccounts
+    linkedAccounts,
+    notifications: notifications.map((notification) => ({
+      id: notification.id,
+      notificationType: notification.notificationType,
+      title: notification.title,
+      message: notification.message,
+      ctaLabel: notification.ctaLabel,
+      ctaPath: notification.ctaPath,
+      readAt: notification.readAt,
+      createdAt: notification.createdAt
+    }))
   };
 }
 
@@ -879,12 +1030,15 @@ export async function updateWorkspaceProfile(input: {
   portfolioType?: string | null;
   notes?: string | null;
 }) {
-  await getWorkspaceAccount(input.publicAccountId);
+  const currentAccount = await getWorkspaceAccount(input.publicAccountId);
+
+  if (input.accountType && input.accountType !== currentAccount.accountType) {
+    throw new AppError("Your workspace role cannot be changed after signup", 400, "WORKSPACE_ROLE_LOCKED");
+  }
 
   await prisma.publicAccount.update({
     where: { id: input.publicAccountId },
     data: {
-      accountType: input.accountType,
       representation: input.representation === undefined ? undefined : input.representation?.trim() || null,
       firstName: input.firstName?.trim(),
       lastName: input.lastName?.trim(),
@@ -916,7 +1070,7 @@ export async function saveWorkspacePassportPhoto(input: {
 }
 
 export async function listWorkspaceProperties(publicAccountId: string) {
-  await getWorkspaceAccount(publicAccountId);
+  const account = await getWorkspaceAccount(publicAccountId);
 
   const items = await prisma.propertyMember.findMany({
     where: { publicAccountId },
@@ -928,6 +1082,12 @@ export async function listWorkspaceProperties(publicAccountId: string) {
           },
           units: {
             orderBy: { createdAt: "asc" }
+          },
+          agentInvites: {
+            include: {
+              recipientAccount: true
+            },
+            orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }]
           },
           _count: {
             select: {
@@ -945,43 +1105,63 @@ export async function listWorkspaceProperties(publicAccountId: string) {
   });
 
   return {
-    items: items.map((entry) => ({
-      id: entry.property.id,
-      name: entry.property.name,
-      summaryLabel: propertySummary(entry.property),
-      ownerName: entry.property.ownerName,
-      landlordEmail: entry.property.landlordEmail,
-      address: entry.property.address,
-      city: entry.property.city,
-      state: entry.property.state,
-      propertyType: entry.property.propertyType,
-      bedroomCount: entry.property.bedroomCount,
-      bathroomCount: entry.property.bathroomCount,
-      toiletCount: entry.property.toiletCount,
-      unitCount: entry.property.unitCount,
-      isOccupied: entry.property.isOccupied,
-      currentTenantName: entry.property.currentTenantName,
-      currentTenantEmail: entry.property.currentTenantEmail,
-      currentTenantPhone: entry.property.currentTenantPhone,
-      membershipRole: entry.role,
-      createdAt: entry.property.createdAt,
-      members: entry.property.members.map(memberSummary),
-      proposedRenterCount: entry.property._count.proposedRenters,
-      units: entry.property.units.map((unit) => ({
-        id: unit.id,
-        label: unit.label,
-        address: unit.address,
-        city: unit.city,
-        state: unit.state,
-        bedroomCount: unit.bedroomCount,
-        bathroomCount: unit.bathroomCount,
-        annualRentAmountNgn: unit.annualRentAmountNgn,
-        isOccupied: unit.isOccupied,
-        currentTenantName: unit.currentTenantName,
-        currentTenantEmail: unit.currentTenantEmail,
-        currentTenantPhone: unit.currentTenantPhone
-      }))
-    }))
+    items: items.map((entry) => {
+      const acceptedAgentMember = entry.property.members.find((member) => member.role === "AGENT");
+      const activeInvite = entry.property.agentInvites.find((invite) => invite.status !== "DECLINED");
+
+      return {
+        id: entry.property.id,
+        name: entry.property.name,
+        summaryLabel: propertySummary(entry.property),
+        ownerName: entry.property.ownerName,
+        landlordEmail: entry.property.landlordEmail,
+        address: entry.property.address,
+        city: entry.property.city,
+        state: entry.property.state,
+        propertyType: entry.property.propertyType,
+        bedroomCount: entry.property.bedroomCount,
+        bathroomCount: entry.property.bathroomCount,
+        toiletCount: entry.property.toiletCount,
+        unitCount: entry.property.unitCount,
+        isOccupied: entry.property.isOccupied,
+        currentTenantName: entry.property.currentTenantName,
+        currentTenantEmail: entry.property.currentTenantEmail,
+        currentTenantPhone: entry.property.currentTenantPhone,
+        membershipRole: entry.role,
+        createdAt: entry.property.createdAt,
+        members: entry.property.members.map(memberSummary),
+        proposedRenterCount: entry.property._count.proposedRenters,
+        agentAssignment: acceptedAgentMember
+          ? {
+              status: "ACCEPTED" as PropertyAgentInviteStatus,
+              email: acceptedAgentMember.account.email,
+              name: publicAccountDisplayName(acceptedAgentMember.account)
+            }
+          : activeInvite
+            ? {
+                status: activeInvite.status,
+                email: activeInvite.recipientEmail,
+                name: activeInvite.recipientAccount ? publicAccountDisplayName(activeInvite.recipientAccount) : null
+              }
+            : null,
+        units: entry.property.units.map((unit) => ({
+          id: unit.id,
+          label: unit.label,
+          address: unit.address,
+          city: unit.city,
+          state: unit.state,
+          bedroomCount: unit.bedroomCount,
+          bathroomCount: unit.bathroomCount,
+          annualRentAmountNgn: unit.annualRentAmountNgn,
+          isOccupied: unit.isOccupied,
+          availableForRentInMonths: unit.availableForRentInMonths,
+          currentTenantName: unit.currentTenantName,
+          currentTenantEmail: unit.currentTenantEmail,
+          currentTenantPhone: unit.currentTenantPhone
+        }))
+      };
+    }),
+    pendingAgentInvites: account.accountType === "AGENT" ? await listPendingWorkspaceAgentInvites(publicAccountId) : []
   };
 }
 
@@ -1002,6 +1182,7 @@ export async function createWorkspaceProperty(input: {
     bathroomCount: number;
     annualRentAmountNgn?: number | null;
     isOccupied: boolean;
+    availableForRentInMonths?: number | null;
     currentTenantName?: string;
     currentTenantEmail?: string;
     currentTenantPhone?: string;
@@ -1023,6 +1204,7 @@ export async function createWorkspaceProperty(input: {
       bathroomCount: unit.bathroomCount,
       annualRentAmountNgn: unit.annualRentAmountNgn ?? null,
       isOccupied: unit.isOccupied,
+      availableForRentInMonths: unit.isOccupied ? unit.availableForRentInMonths ?? null : null,
       currentTenantName: unit.isOccupied ? unit.currentTenantName?.trim() || null : null,
       currentTenantEmail: unit.isOccupied ? normalizeOptionalEmail(unit.currentTenantEmail) : null,
       currentTenantPhone: unit.isOccupied ? unit.currentTenantPhone?.trim() || null : null
@@ -1081,6 +1263,7 @@ export async function createWorkspaceProperty(input: {
         bathroomCount: unit.bathroomCount,
         annualRentAmountNgn: unit.annualRentAmountNgn,
         isOccupied: unit.isOccupied,
+        availableForRentInMonths: unit.availableForRentInMonths,
         currentTenantName: unit.currentTenantName,
         currentTenantEmail: unit.currentTenantEmail,
         currentTenantPhone: unit.currentTenantPhone
@@ -1109,6 +1292,7 @@ export async function updateWorkspaceProperty(input: {
     bathroomCount: number;
     annualRentAmountNgn?: number | null;
     isOccupied: boolean;
+    availableForRentInMonths?: number | null;
     currentTenantName?: string;
     currentTenantEmail?: string;
     currentTenantPhone?: string;
@@ -1131,6 +1315,7 @@ export async function updateWorkspaceProperty(input: {
       bathroomCount: unit.bathroomCount,
       annualRentAmountNgn: unit.annualRentAmountNgn ?? null,
       isOccupied: unit.isOccupied,
+      availableForRentInMonths: unit.isOccupied ? unit.availableForRentInMonths ?? null : null,
       currentTenantName: unit.isOccupied ? unit.currentTenantName?.trim() || null : null,
       currentTenantEmail: unit.isOccupied ? normalizeOptionalEmail(unit.currentTenantEmail) : null,
       currentTenantPhone: unit.isOccupied ? unit.currentTenantPhone?.trim() || null : null
@@ -1194,6 +1379,7 @@ export async function updateWorkspaceProperty(input: {
         bathroomCount: unit.bathroomCount,
         annualRentAmountNgn: unit.annualRentAmountNgn,
         isOccupied: unit.isOccupied,
+        availableForRentInMonths: unit.availableForRentInMonths,
         currentTenantName: unit.currentTenantName,
         currentTenantEmail: unit.currentTenantEmail,
         currentTenantPhone: unit.currentTenantPhone
@@ -1215,33 +1401,188 @@ export async function shareWorkspaceProperty(input: {
       throw new AppError("Only landlord accounts can link agents to properties", 403, "FORBIDDEN");
     }
     const membership = await getPropertyMembership(input.publicAccountId, input.propertyId, tx);
+    const sharedWithEmail = normalizeEmail(input.sharedWithEmail);
     const partner = await tx.publicAccount.findUnique({
-      where: { email: normalizeEmail(input.sharedWithEmail) }
+      where: { email: sharedWithEmail }
     });
-
-    if (!partner || partner.status !== "ACTIVE") {
-      throw new AppError("Shared account was not found or is not active", 404, "SHARED_ACCOUNT_NOT_FOUND");
-    }
+    const acceptedAgentInvite = await getAcceptedPropertyAgentInvite(membership.propertyId, tx);
+    const acceptedAgentMember = membership.property.members.find((member) => member.role === "AGENT");
 
     const expectedType: PublicAccountType = "AGENT";
-    if (partner.accountType !== expectedType) {
-      throw new AppError(`Shared account must be an active ${expectedType.toLowerCase()} account`, 400, "INVALID_SHARED_ACCOUNT");
+    if (partner && partner.accountType !== expectedType) {
+      throw new AppError(`Shared account must be an ${expectedType.toLowerCase()} account`, 400, "INVALID_SHARED_ACCOUNT");
+    }
+
+    if (partner && partner.status !== "ACTIVE") {
+      throw new AppError("Agent account is not active yet", 400, "AGENT_ACCOUNT_INACTIVE");
+    }
+
+    if (acceptedAgentMember) {
+      const acceptedEmail = normalizeEmail(acceptedAgentMember.account.email);
+      if (acceptedEmail === sharedWithEmail) {
+        return {
+          ...(await listWorkspaceProperties(input.publicAccountId)),
+          mode: "ALREADY_ACCEPTED" as const
+        };
+      }
+      throw new AppError("This property is already managed by an accepted agent", 409, "PROPERTY_AGENT_ALREADY_ACCEPTED");
+    }
+
+    if (acceptedAgentInvite && normalizeEmail(acceptedAgentInvite.recipientEmail) !== sharedWithEmail) {
+      throw new AppError("This property is already managed by an accepted agent", 409, "PROPERTY_AGENT_ALREADY_ACCEPTED");
+    }
+
+    await tx.propertyAgentInvite.upsert({
+      where: {
+        propertyId_recipientEmail: {
+          propertyId: membership.propertyId,
+          recipientEmail: sharedWithEmail
+        }
+      },
+      update: {
+        invitedByAccountId: currentAccount.id,
+        recipientAccountId: partner?.id || null,
+        status: "PENDING",
+        acceptedAt: null,
+        respondedAt: null
+      },
+      create: {
+        propertyId: membership.propertyId,
+        invitedByAccountId: currentAccount.id,
+        recipientEmail: sharedWithEmail,
+        recipientAccountId: partner?.id || null,
+        status: "PENDING"
+      }
+    });
+
+    if (partner?.status === "ACTIVE") {
+      await createPublicAccountNotification({
+        publicAccountId: partner.id,
+        notificationType: "AGENT_INVITE",
+        title: "Property invite received",
+        message: `${publicAccountDisplayName(currentAccount)} invited you to manage ${membership.property.name}.`,
+        ctaLabel: "Open properties",
+        ctaPath: "/account/properties",
+        metadata: {
+          propertyId: membership.propertyId,
+          propertyName: membership.property.name,
+          propertyAddress: formatPropertyAddress(membership.property)
+        },
+        tx
+      });
+    }
+
+    const inviteState = await notifyInvitedAgent({
+      landlordName: publicAccountDisplayName(currentAccount),
+      propertySummaryLabel: membership.property.name,
+      propertyAddress: formatPropertyAddress(membership.property),
+      agentEmail: sharedWithEmail
+    });
+
+    return {
+      ...(await listWorkspaceProperties(input.publicAccountId)),
+      mode: "INVITE_SENT" as const,
+      invitePreviewUrl: inviteState.invitePreviewUrl
+    };
+  });
+}
+
+export async function respondToWorkspaceAgentInvite(input: {
+  publicAccountId: string;
+  inviteId: string;
+  action: "ACCEPT" | "DECLINE";
+}) {
+  return prisma.$transaction(async (tx) => {
+    const currentAccount = await getWorkspaceAccount(input.publicAccountId, tx);
+    if (currentAccount.accountType !== "AGENT") {
+      throw new AppError("Only agent accounts can respond to property invites", 403, "FORBIDDEN");
+    }
+
+    const invite = await tx.propertyAgentInvite.findFirst({
+      where: {
+        id: input.inviteId,
+        status: "PENDING",
+        OR: [{ recipientAccountId: currentAccount.id }, { recipientEmail: currentAccount.email }]
+      },
+      include: {
+        property: {
+          include: {
+            members: {
+              include: {
+                account: true
+              }
+            }
+          }
+        }
+      }
+    });
+
+    if (!invite) {
+      throw new AppError("Property invite not found", 404, "PROPERTY_AGENT_INVITE_NOT_FOUND");
+    }
+
+    if (input.action === "DECLINE") {
+      await tx.propertyAgentInvite.update({
+        where: { id: invite.id },
+        data: {
+          recipientAccountId: currentAccount.id,
+          status: "DECLINED",
+          acceptedAt: null,
+          respondedAt: new Date()
+        }
+      });
+
+      return listWorkspaceProperties(input.publicAccountId);
+    }
+
+    const acceptedAgentMember = invite.property.members.find((member) => member.role === "AGENT");
+    if (acceptedAgentMember && acceptedAgentMember.publicAccountId !== currentAccount.id) {
+      throw new AppError("Another agent has already accepted this property", 409, "PROPERTY_AGENT_ALREADY_ACCEPTED");
+    }
+
+    const acceptedInvite = await getAcceptedPropertyAgentInvite(invite.propertyId, tx);
+    if (acceptedInvite && acceptedInvite.id !== invite.id && normalizeEmail(acceptedInvite.recipientEmail) !== currentAccount.email) {
+      throw new AppError("Another agent has already accepted this property", 409, "PROPERTY_AGENT_ALREADY_ACCEPTED");
     }
 
     await tx.propertyMember.upsert({
       where: {
         propertyId_publicAccountId_role: {
-          propertyId: membership.propertyId,
-          publicAccountId: partner.id,
-          role: expectedType === "AGENT" ? "AGENT" : "LANDLORD"
+          propertyId: invite.propertyId,
+          publicAccountId: currentAccount.id,
+          role: "AGENT"
         }
       },
       update: {},
       create: {
-        propertyId: membership.propertyId,
-        publicAccountId: partner.id,
-        role: expectedType === "AGENT" ? "AGENT" : "LANDLORD",
+        propertyId: invite.propertyId,
+        publicAccountId: currentAccount.id,
+        role: "AGENT",
         isPrimary: false
+      }
+    });
+
+    const respondedAt = new Date();
+
+    await tx.propertyAgentInvite.update({
+      where: { id: invite.id },
+      data: {
+        recipientAccountId: currentAccount.id,
+        status: "ACCEPTED",
+        acceptedAt: respondedAt,
+        respondedAt
+      }
+    });
+
+    await tx.propertyAgentInvite.updateMany({
+      where: {
+        propertyId: invite.propertyId,
+        id: { not: invite.id },
+        status: "PENDING"
+      },
+      data: {
+        status: "DECLINED",
+        respondedAt
       }
     });
 
@@ -1410,6 +1751,8 @@ export async function listWorkspaceQueue(publicAccountId: string) {
           city: item.city,
           state: item.state,
           status: item.status,
+          renterLinkResponseStatus: item.renterLinkResponseStatus,
+          renterLinkRespondedAt: item.renterLinkRespondedAt,
           property: {
             id: item.property.id,
             name: item.property.name,
@@ -1433,11 +1776,28 @@ export async function listWorkspaceQueue(publicAccountId: string) {
                 bedroomCount: item.propertyUnit.bedroomCount,
                 bathroomCount: item.propertyUnit.bathroomCount,
                 isOccupied: item.propertyUnit.isOccupied,
+                availableForRentInMonths: item.propertyUnit.availableForRentInMonths ?? null,
                 currentTenantName: item.propertyUnit.currentTenantName,
                 currentTenantEmail: item.propertyUnit.currentTenantEmail,
                 currentTenantPhone: item.propertyUnit.currentTenantPhone
               }
-            : null,
+            : resolvedPropertyUnit
+              ? {
+                  id: resolvedPropertyUnit.id,
+                  label: resolvedPropertyUnit.label,
+                  summaryLabel: propertyUnitSummary(resolvedPropertyUnit),
+                  address: resolvedPropertyUnit.address,
+                  city: resolvedPropertyUnit.city,
+                  state: resolvedPropertyUnit.state,
+                  bedroomCount: resolvedPropertyUnit.bedroomCount,
+                  bathroomCount: resolvedPropertyUnit.bathroomCount,
+                  isOccupied: resolvedPropertyUnit.isOccupied,
+                  availableForRentInMonths: resolvedPropertyUnit.availableForRentInMonths ?? null,
+                  currentTenantName: resolvedPropertyUnit.currentTenantName,
+                  currentTenantEmail: resolvedPropertyUnit.currentTenantEmail,
+                  currentTenantPhone: resolvedPropertyUnit.currentTenantPhone
+                }
+              : null,
           linkedRentScore: canViewRentScore ? await mapLinkedRentScore(item.renterAccountId) : null,
           decision: item.decision
             ? {
@@ -1625,6 +1985,9 @@ export async function getWorkspaceQueueItem(publicAccountId: string, proposedRen
     city: item.city,
     state: item.state,
     status: item.status,
+    renterLinkResponseStatus: item.renterLinkResponseStatus,
+    renterLinkRespondedAt: item.renterLinkRespondedAt,
+    renterLinkResponseNote: item.renterLinkResponseNote,
     notes: item.notes,
     linkedRentScore,
     linkedRentScoreReport,
@@ -1663,6 +2026,7 @@ export async function getWorkspaceQueueItem(publicAccountId: string, proposedRen
         bedroomCount: unit.bedroomCount,
         bathroomCount: unit.bathroomCount,
         isOccupied: unit.isOccupied,
+        availableForRentInMonths: unit.availableForRentInMonths ?? null,
         currentTenantName: unit.currentTenantName,
         currentTenantEmail: unit.currentTenantEmail,
         currentTenantPhone: unit.currentTenantPhone
@@ -1679,6 +2043,7 @@ export async function getWorkspaceQueueItem(publicAccountId: string, proposedRen
                 bedroomCount: resolvedPropertyUnit.bedroomCount,
                 bathroomCount: resolvedPropertyUnit.bathroomCount,
                 isOccupied: resolvedPropertyUnit.isOccupied,
+                availableForRentInMonths: resolvedPropertyUnit.availableForRentInMonths ?? null,
                 currentTenantName: resolvedPropertyUnit.currentTenantName,
                 currentTenantEmail: resolvedPropertyUnit.currentTenantEmail,
                 currentTenantPhone: resolvedPropertyUnit.currentTenantPhone
@@ -1777,6 +2142,7 @@ export async function getWorkspaceQueueItem(publicAccountId: string, proposedRen
           }
         : null,
       confirmationTiming: schedule.confirmationTiming,
+      confirmationOutcome: schedule.confirmationOutcome,
       createdBy: {
         id: schedule.createdBy.id,
         name: publicAccountDisplayName(schedule.createdBy),
@@ -2084,6 +2450,7 @@ export async function createWorkspaceProposedRenter(input: {
       address: linkedAccount?.address || input.address?.trim() || "",
       state: linkedAccount?.state || input.state?.trim() || "",
       city: linkedAccount?.city || input.city?.trim() || "",
+      renterLinkResponseStatus: "PENDING" as const,
       notes: input.notes?.trim() || null
     };
 
@@ -2487,6 +2854,10 @@ export async function requestWorkspaceRentScore(input: {
     const currentAccount = await getWorkspaceAccount(input.publicAccountId, tx);
     const proposedRenter = await getAccessibleProposedRenter(input.publicAccountId, input.proposedRenterId, tx);
 
+    if (proposedRenter.renterLinkResponseStatus !== "ACCEPTED") {
+      throw new AppError("The renter must accept the property link before you can request rent score", 400, "RENTER_LINK_NOT_ACCEPTED");
+    }
+
     const existingScoreRequest = await tx.scoreRequest.findFirst({
       where: { proposedRenterId: proposedRenter.id },
       select: { id: true }
@@ -2763,11 +3134,15 @@ export async function updateWorkspacePaymentSchedule(input: {
 export async function confirmWorkspacePaymentSchedule(input: {
   publicAccountId: string;
   paymentScheduleId: string;
+  outcome: PaymentConfirmationOutcome;
   paidAt?: Date | null;
   note?: string;
 }) {
   const result = await prisma.$transaction(async (tx) => {
     const actor = await getWorkspaceAccount(input.publicAccountId, tx);
+    if (actor.accountType !== "LANDLORD") {
+      throw new AppError("Only landlord accounts can review renter payment proof", 403, "FORBIDDEN");
+    }
     const schedule = await tx.paymentSchedule.findFirst({
       where: {
         id: input.paymentScheduleId,
@@ -2787,9 +3162,21 @@ export async function confirmWorkspacePaymentSchedule(input: {
         paidAt: true,
         confirmationNote: true,
         confirmationInitiatedAt: true,
+        confirmationOutcome: true,
         proposedRenter: {
           select: {
-            renterAccountId: true
+            renterAccountId: true,
+            propertyUnit: {
+              select: {
+                label: true
+              }
+            }
+          }
+        },
+        property: {
+          select: {
+            id: true,
+            name: true
           }
         }
       }
@@ -2803,17 +3190,22 @@ export async function confirmWorkspacePaymentSchedule(input: {
       throw new AppError("Await renter proof of payment before confirming this schedule", 400, "PAYMENT_CONFIRMATION_NOT_READY");
     }
 
-    const paidAt = input.paidAt ?? schedule.paidAt ?? new Date();
-    const timing = resolvePaymentTiming(schedule.dueDate, paidAt);
+    if (schedule.confirmationOutcome) {
+      throw new AppError("This payment proof has already been reviewed", 400, "PAYMENT_ALREADY_REVIEWED");
+    }
+
+    const paidAt = input.outcome === "FULL" ? input.paidAt ?? schedule.paidAt ?? new Date() : null;
+    const timing = paidAt ? resolvePaymentTiming(schedule.dueDate, paidAt) : null;
 
     await tx.paymentSchedule.update({
       where: { id: schedule.id },
       data: {
-        status: "PAID",
+        status: input.outcome === "FULL" ? "PAID" : "PENDING",
         paidAt,
         confirmedAt: new Date(),
         confirmedByAccountId: input.publicAccountId,
         confirmationTiming: timing,
+        confirmationOutcome: input.outcome,
         confirmationNote: input.note?.trim() || schedule.confirmationNote || null
       }
     });
@@ -2823,19 +3215,31 @@ export async function confirmWorkspacePaymentSchedule(input: {
       actorAccountId: input.publicAccountId,
       activityType: "PAYMENT_CONFIRMED",
       message:
-        actor.accountType === "LANDLORD"
-          ? `Landlord confirmed payment as ${timing === "ON_TIME" ? "on time" : "late"}.`
-          : "Payment confirmed by workspace.",
+        input.outcome === "FULL"
+          ? `Landlord confirmed payment in full as ${timing === "ON_TIME" ? "on time" : "late"}.`
+          : "Landlord reviewed payment proof and marked it as partial.",
       metadata: {
         paymentScheduleId: schedule.id,
         confirmedBy: actor.accountType,
-        timing
+        timing,
+        outcome: input.outcome
       } as Prisma.JsonObject,
       tx
     });
 
     if (schedule.paymentType === "UTILITY" && schedule.proposedRenter?.renterAccountId) {
       await syncUtilityPaymentHistoryEvent(schedule.proposedRenter.renterAccountId, tx);
+    }
+
+    if (schedule.proposedRenter?.renterAccountId) {
+      await notifyRenterOfPaymentReview({
+        renterAccountId: schedule.proposedRenter.renterAccountId,
+        paymentType: schedule.paymentType,
+        propertyName: schedule.property.name,
+        propertyUnitLabel: schedule.proposedRenter.propertyUnit?.label ?? null,
+        outcome: input.outcome,
+        tx
+      });
     }
 
     return { proposedRenterId: schedule.proposedRenterId };

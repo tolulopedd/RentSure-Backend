@@ -7,7 +7,7 @@ import { prisma } from "../../prisma/client";
 import { env } from "../../config/env";
 import { AppError } from "../../common/errors/AppError";
 import { logger } from "../../common/logger/logger";
-import { ensureRegistrationRentScoreEvent } from "../rent-score/rent-score.service";
+import { ensureRegistrationRentScoreEvent, ensureSingleRentScoreEvent } from "../rent-score/rent-score.service";
 import { renderTransactionalEmail } from "../mail/mail-templates";
 import { sendTransactionalMail } from "../mail/mail.service";
 
@@ -37,6 +37,8 @@ type PublicSignupInput = {
   portfolioType?: string;
   notes?: string;
 };
+
+const CURRENT_TERMS_VERSION = "2026-08";
 
 const accessTokenTtl = env.JWT_ACCESS_EXPIRES_IN as SignOptions["expiresIn"];
 const refreshTokenTtl = env.JWT_REFRESH_EXPIRES_IN as SignOptions["expiresIn"];
@@ -571,7 +573,63 @@ export async function verifyPublicAccountEmail(rawToken: string) {
   };
 }
 
-export async function completePublicAccountSignup(input: { rawToken: string; password: string }) {
+async function attachPendingAgentInvites(publicAccount: Pick<PublicAccount, "id" | "email" | "accountType">) {
+  if (publicAccount.accountType !== "AGENT") return;
+
+  const pendingInvites = await prisma.propertyAgentInvite.findMany({
+    where: {
+      recipientEmail: publicAccount.email,
+      status: "PENDING"
+    }
+  });
+
+  if (!pendingInvites.length) return;
+
+  await prisma.propertyAgentInvite.updateMany({
+    where: {
+      recipientEmail: publicAccount.email,
+      status: "PENDING"
+    },
+    data: {
+      recipientAccountId: publicAccount.id
+    }
+  });
+}
+
+async function attachPendingRenterLinks(publicAccount: Pick<PublicAccount, "id" | "email" | "accountType">) {
+  if (publicAccount.accountType !== "RENTER") return;
+
+  const pendingLinks = await prisma.proposedRenter.findMany({
+    where: {
+      renterAccountId: null,
+      email: publicAccount.email
+    },
+    select: { id: true }
+  });
+
+  if (!pendingLinks.length) return;
+
+  await prisma.proposedRenter.updateMany({
+    where: {
+      renterAccountId: null,
+      email: publicAccount.email
+    },
+    data: {
+      renterAccountId: publicAccount.id
+    }
+  });
+}
+
+export async function completePublicAccountSignup(input: {
+  rawToken: string;
+  password: string;
+  acceptedTerms: boolean;
+  acceptedTermsVersion?: string | null;
+}) {
+  if (!input.acceptedTerms) {
+    throw new AppError("Accept the Terms and Conditions before continuing", 400, "TERMS_NOT_ACCEPTED");
+  }
+
   const tokenHash = hashVerificationToken(input.rawToken.trim());
 
   const token = await prisma.emailVerificationToken.findUnique({
@@ -603,14 +661,20 @@ export async function completePublicAccountSignup(input: { rawToken: string; pas
       data: {
         passwordHash,
         emailVerifiedAt: new Date(),
-        status: token.publicAccount.status === "DISABLED" ? "DISABLED" : "ACTIVE"
+        status: token.publicAccount.status === "DISABLED" ? "DISABLED" : "ACTIVE",
+        acceptedTermsAt: new Date(),
+        acceptedTermsVersion: input.acceptedTermsVersion?.trim() || CURRENT_TERMS_VERSION
       }
     });
   });
 
   if (updatedAccount.accountType === "RENTER") {
     await ensureRegistrationRentScoreEvent(updatedAccount.id);
+    await ensureSingleRentScoreEvent(updatedAccount.id, "EMAIL_VERIFIED", "Automatic email verification bonus");
+    await attachPendingRenterLinks(updatedAccount);
   }
+
+  await attachPendingAgentInvites(updatedAccount);
 
   const session = await createPublicSession(updatedAccount);
   const onboardingRoute =

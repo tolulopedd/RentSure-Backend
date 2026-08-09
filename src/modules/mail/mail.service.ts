@@ -4,6 +4,8 @@ import { createMailPreview } from "../mail-preview/mail-preview.service";
 
 type MailCategory =
   | "EMAIL_VERIFICATION"
+  | "AGENT_INVITE"
+  | "PROPERTY_LINK_RESPONSE"
   | "RENTER_INVITE"
   | "RENTER_DECISION"
   | "RENTER_NOTIFICATION"

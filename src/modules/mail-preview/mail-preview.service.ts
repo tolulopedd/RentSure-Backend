@@ -3,6 +3,8 @@ import { env } from "../../config/env";
 
 type MailPreviewCategory =
   | "EMAIL_VERIFICATION"
+  | "AGENT_INVITE"
+  | "PROPERTY_LINK_RESPONSE"
   | "RENTER_INVITE"
   | "RENTER_DECISION"
   | "RENTER_NOTIFICATION"
@@ -44,6 +46,8 @@ function previewUrl(id: string) {
 
 function categoryLabel(category: MailPreviewCategory) {
   if (category === "EMAIL_VERIFICATION") return "Email Verification";
+  if (category === "AGENT_INVITE") return "Agent Invite";
+  if (category === "PROPERTY_LINK_RESPONSE") return "Property Link Response";
   if (category === "RENTER_INVITE") return "Renter Invite";
   if (category === "RENTER_DECISION") return "Renter Decision";
   if (category === "RENTER_NOTIFICATION") return "Renter Notification";
@@ -58,6 +62,22 @@ function categoryTheme(category: MailPreviewCategory) {
       badgeText: "#1d4ed8",
       accent: "#2563eb",
       tint: "rgba(37,99,235,0.12)"
+    };
+  }
+  if (category === "AGENT_INVITE") {
+    return {
+      badgeBg: "#e0e7ff",
+      badgeText: "#4338ca",
+      accent: "#4f46e5",
+      tint: "rgba(79,70,229,0.12)"
+    };
+  }
+  if (category === "PROPERTY_LINK_RESPONSE") {
+    return {
+      badgeBg: "#ede9fe",
+      badgeText: "#5b21b6",
+      accent: "#7c3aed",
+      tint: "rgba(124,58,237,0.12)"
     };
   }
   if (category === "RENTER_INVITE") {

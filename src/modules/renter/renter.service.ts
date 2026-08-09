@@ -1,10 +1,11 @@
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../../prisma/client";
 import { AppError } from "../../common/errors/AppError";
-import { buildRentScoreSnapshot, ensureSingleRentScoreEvent, syncUtilityPaymentHistoryEvent } from "../rent-score/rent-score.service";
+import { buildRentScoreSnapshot, replaceRentScoreEventsByCodes, syncUtilityPaymentHistoryEvent } from "../rent-score/rent-score.service";
 import { attachPassportPhotoToPublicAccount, buildPublicDocumentViewUrl, toPublicDocumentAsset } from "../storage/storage.service";
 import { createMailPreview } from "../mail-preview/mail-preview.service";
 import { renderInfoPanel, renderTransactionalEmail } from "../mail/mail-templates";
+import { sendTransactionalMail } from "../mail/mail.service";
 import { getAvailableRentScorePaymentProviders } from "../score-payments/score-payments.service";
 
 function normalizeEmail(email: string) {
@@ -14,6 +15,28 @@ function normalizeEmail(email: string) {
 function publicAccountDisplayName(account: { firstName: string; lastName: string; organizationName?: string | null }) {
   if (account.organizationName?.trim()) return account.organizationName.trim();
   return [account.firstName, account.lastName].filter(Boolean).join(" ");
+}
+
+async function createPublicAccountNotification(input: {
+  publicAccountId: string;
+  notificationType: "PROPERTY_LINKED" | "PROPERTY_LINK_RESPONSE" | "PAYMENT_UPDATE" | "IDENTITY_REVIEW";
+  title: string;
+  message: string;
+  ctaLabel?: string;
+  ctaPath?: string;
+  metadata?: Prisma.JsonObject;
+}) {
+  await prisma.publicAccountNotification.create({
+    data: {
+      publicAccountId: input.publicAccountId,
+      notificationType: input.notificationType as any,
+      title: input.title,
+      message: input.message,
+      ctaLabel: input.ctaLabel ?? null,
+      ctaPath: input.ctaPath ?? null,
+      metadata: input.metadata
+    }
+  });
 }
 
 function rentScoreBandLabel(scoreBand: string) {
@@ -209,6 +232,8 @@ async function logRenterActivity(input: {
   activityType:
     | "COMMENT"
     | "CREATED"
+    | "LINK_ACCEPTED"
+    | "LINK_WITHDRAWN"
     | "SCORE_REQUESTED"
     | "SCORE_REQUEST_ACCEPTED"
     | "SCORE_FORWARDED"
@@ -217,7 +242,9 @@ async function logRenterActivity(input: {
     | "PAYMENT_SCHEDULE_UPDATED"
     | "PAYMENT_CONFIRMATION_INITIATED"
     | "PAYMENT_CONFIRMED"
-    | "RENTER_PAYMENT_CONFIRMED";
+    | "RENTER_PAYMENT_CONFIRMED"
+    | "LINK_ACCEPTED"
+    | "LINK_WITHDRAWN";
   message: string;
   metadata?: Prisma.JsonObject;
 }) {
@@ -225,11 +252,106 @@ async function logRenterActivity(input: {
     data: {
       proposedRenterId: input.proposedRenterId,
       actorAccountId: input.actorAccountId,
-      activityType: input.activityType,
+      activityType: input.activityType as any,
       message: input.message,
       metadata: input.metadata
     }
   });
+}
+
+async function notifyLinkedPropertyStakeholders(input: {
+  linkedCaseId: string;
+  renterName: string;
+  renterEmail: string;
+  propertyAddress: string;
+  responseStatus: "ACCEPTED" | "WITHDRAWN";
+  responseNote?: string | null;
+}) {
+  const linkedCase = await prisma.proposedRenter.findUnique({
+    where: { id: input.linkedCaseId },
+    include: {
+      property: {
+        include: {
+          members: {
+            include: {
+              account: true
+            }
+          }
+        }
+      },
+      requestedBy: true
+    }
+  });
+
+  if (!linkedCase) return;
+
+  const recipients = new Map<string, { id: string; email: string; name: string }>();
+  linkedCase.property.members.forEach((member) => {
+    if (member.role === "LANDLORD" || member.publicAccountId === linkedCase.requestedByAccountId) {
+      recipients.set(member.account.id, {
+        id: member.account.id,
+        email: member.account.email,
+        name: publicAccountDisplayName(member.account)
+      });
+    }
+  });
+
+  if (
+    (linkedCase.requestedBy.accountType === "LANDLORD" || linkedCase.requestedBy.accountType === "AGENT") &&
+    linkedCase.requestedBy.status === "ACTIVE"
+  ) {
+    recipients.set(linkedCase.requestedBy.id, {
+      id: linkedCase.requestedBy.id,
+      email: linkedCase.requestedBy.email,
+      name: publicAccountDisplayName(linkedCase.requestedBy)
+    });
+  }
+
+  const title =
+    input.responseStatus === "ACCEPTED"
+      ? `${input.renterName} accepted the property link`
+      : `${input.renterName} withdrew from the property link`;
+  const message =
+    input.responseStatus === "ACCEPTED"
+      ? `${input.renterName} accepted the property link for ${input.propertyAddress}.`
+      : `${input.renterName} withdrew from the property link for ${input.propertyAddress}.`;
+
+  await Promise.all(
+    Array.from(recipients.values()).map(async (recipient) => {
+      await prisma.publicAccountNotification.create({
+        data: {
+          publicAccountId: recipient.id,
+          notificationType: "PROPERTY_LINK_RESPONSE" as any,
+          title,
+          message,
+          ctaLabel: "Open Link Tenant",
+          ctaPath: "/account/queue",
+          metadata: {
+            linkedCaseId: input.linkedCaseId,
+            renterEmail: input.renterEmail,
+            responseStatus: input.responseStatus
+          } satisfies Prisma.JsonObject
+        }
+      });
+
+      await sendTransactionalMail({
+        category: "PROPERTY_LINK_RESPONSE",
+        to: recipient.email,
+        subject: input.responseStatus === "ACCEPTED" ? "Renter accepted property link" : "Renter withdrew from property link",
+        html: renderTransactionalEmail({
+          eyebrow: "Property Link Update",
+          title,
+          greeting: `Dear ${recipient.name},`,
+          paragraphs: [
+            `${input.renterName} has ${input.responseStatus === "ACCEPTED" ? "accepted" : "withdrawn from"} the property link for <strong>${input.propertyAddress}</strong>.`,
+            input.responseNote?.trim() ? `Renter note: ${input.responseNote.trim()}` : "Open RentSure to review the linked tenant record."
+          ],
+          ctaLabel: "Open linked tenant",
+          ctaUrl: "/account/queue"
+        })
+      });
+    })
+  );
 }
 
 function buildRenterScoreSharePayload(input: {
@@ -409,7 +531,7 @@ export async function getRenterDashboard(publicAccountId: string) {
     Boolean(account.address),
     Boolean(account.city),
     Boolean(account.state),
-    Boolean(account.ninVerifiedAt || account.bvnVerifiedAt)
+    account.identityReviewStatus === "APPROVED"
   ].filter(Boolean).length;
 
   return {
@@ -429,6 +551,11 @@ export async function getRenterDashboard(publicAccountId: string) {
       employmentType: account.employmentType,
       employmentYears: account.employmentYears,
       notes: account.notes,
+      identityVerificationType: account.identityVerificationType,
+      identitySubmittedAt: account.identitySubmittedAt,
+      identityReviewStatus: account.identityReviewStatus,
+      identityReviewedAt: account.identityReviewedAt,
+      identityReviewComment: account.identityReviewComment,
       nin: null,
       ninVerifiedAt: account.ninVerifiedAt,
       bvn: null,
@@ -497,6 +624,9 @@ export async function getRenterDashboard(publicAccountId: string) {
     linkedCases: linkedCases.map((item) => ({
       id: item.id,
       status: item.status,
+      renterLinkResponseStatus: "renterLinkResponseStatus" in item ? ((item as any).renterLinkResponseStatus ?? "PENDING") : "PENDING",
+      renterLinkRespondedAt: "renterLinkRespondedAt" in item ? ((item as any).renterLinkRespondedAt ?? null) : null,
+      renterLinkResponseNote: "renterLinkResponseNote" in item ? ((item as any).renterLinkResponseNote ?? null) : null,
       decision: item.decision,
       decisionNote: item.decisionNote,
       property: {
@@ -519,6 +649,7 @@ export async function getRenterDashboard(publicAccountId: string) {
             bedroomCount: item.propertyUnit.bedroomCount,
             bathroomCount: item.propertyUnit.bathroomCount,
             isOccupied: item.propertyUnit.isOccupied,
+            availableForRentInMonths: item.propertyUnit.availableForRentInMonths ?? null,
             currentTenantName: item.propertyUnit.currentTenantName,
             currentTenantEmail: item.propertyUnit.currentTenantEmail,
             currentTenantPhone: item.propertyUnit.currentTenantPhone
@@ -551,6 +682,7 @@ export async function getRenterDashboard(publicAccountId: string) {
         confirmationInitiatedAt: schedule.confirmationInitiatedAt,
         confirmedAt: schedule.confirmedAt,
         confirmationTiming: schedule.confirmationTiming,
+        confirmationOutcome: schedule.confirmationOutcome,
         paymentEvidenceObjectKey: schedule.paymentEvidenceObjectKey,
         paymentEvidenceFileName: schedule.paymentEvidenceFileName,
         paymentEvidenceMimeType: schedule.paymentEvidenceMimeType,
@@ -630,7 +762,7 @@ export async function saveRenterPassportPhoto(input: {
   return getRenterDashboard(input.publicAccountId);
 }
 
-export async function verifyRenterIdentity(input: {
+export async function submitRenterIdentityForReview(input: {
   publicAccountId: string;
   verificationType: "NIN" | "BVN";
   value: string;
@@ -641,21 +773,41 @@ export async function verifyRenterIdentity(input: {
     throw new AppError(`${input.verificationType} must be 11 digits`, 400, "VALIDATION_ERROR");
   }
 
+  if (account.identityReviewStatus === "PENDING") {
+    throw new AppError("Your identity submission is already pending review", 409, "IDENTITY_REVIEW_PENDING");
+  }
+
   await prisma.publicAccount.update({
     where: { id: account.id },
     data:
       input.verificationType === "NIN"
         ? {
             nin: cleanValue,
-            ninVerifiedAt: new Date()
+            ninVerifiedAt: null,
+            identityVerificationType: "NIN",
+            identitySubmittedAt: new Date(),
+            identityReviewStatus: "PENDING",
+            identityReviewedAt: null,
+            identityReviewedByUserId: null,
+            identityReviewComment: null
           }
         : {
             bvn: cleanValue,
-            bvnVerifiedAt: new Date()
+            bvnVerifiedAt: null,
+            identityVerificationType: "BVN",
+            identitySubmittedAt: new Date(),
+            identityReviewStatus: "PENDING",
+            identityReviewedAt: null,
+            identityReviewedByUserId: null,
+            identityReviewComment: null
           }
   });
 
-  await ensureSingleRentScoreEvent(account.id, "GOVERNMENT_ID_VERIFIED", `${input.verificationType} verified on RentSure`);
+  await replaceRentScoreEventsByCodes({
+    publicAccountId: account.id,
+    codes: ["GOVERNMENT_ID_VERIFIED"],
+    newEvent: null
+  });
   return getRenterDashboard(account.id);
 }
 
@@ -738,6 +890,22 @@ export async function initiateRenterPaymentConfirmation(input: {
         decision: "APPROVED",
         propertyUnitId: { not: null }
       }
+    },
+    include: {
+      property: {
+        include: {
+          members: true
+        }
+      },
+      proposedRenter: {
+        select: {
+          propertyUnit: {
+            select: {
+              label: true
+            }
+          }
+        }
+      }
     }
   });
 
@@ -788,6 +956,30 @@ export async function initiateRenterPaymentConfirmation(input: {
     } as Prisma.JsonObject
   });
 
+  const landlordMembers = schedule.property.members.filter((member) => member.role === "LANDLORD");
+  const paymentLabel = schedule.paymentType.replaceAll("_", " ").toLowerCase();
+  const locationLabel = schedule.proposedRenter.propertyUnit?.label?.trim()
+    ? `${schedule.property.name} (${schedule.proposedRenter.propertyUnit.label.trim()})`
+    : schedule.property.name;
+
+  await Promise.all(
+    landlordMembers.map((member) =>
+      createPublicAccountNotification({
+        publicAccountId: member.publicAccountId,
+        notificationType: "PAYMENT_UPDATE",
+        title: "Payment proof submitted",
+        message: `A renter submitted ${paymentLabel} proof for ${locationLabel}. Review it in Payments.`,
+        ctaLabel: "Open payments",
+        ctaPath: "/account/payments",
+        metadata: {
+          paymentScheduleId: schedule.id,
+          proposedRenterId: schedule.proposedRenterId,
+          paymentType: schedule.paymentType
+        } as Prisma.JsonObject
+      })
+    )
+  );
+
   return getRenterDashboard(input.publicAccountId);
 }
 
@@ -817,13 +1009,19 @@ export async function createSelfInitiatedRenterPayment(input: {
       id: true,
       propertyId: true,
       propertyUnitId: true,
+      propertyUnit: {
+        select: {
+          label: true
+        }
+      },
       property: {
         select: {
           id: true,
           name: true,
           address: true,
           city: true,
-          state: true
+          state: true,
+          members: true
         }
       }
     }
@@ -873,6 +1071,30 @@ export async function createSelfInitiatedRenterPayment(input: {
     } as Prisma.JsonObject
   });
 
+  const landlordMembers = linkedCase.property.members.filter((member) => member.role === "LANDLORD");
+  const paymentLabel = input.paymentType.replaceAll("_", " ").toLowerCase();
+  const locationLabel = linkedCase.propertyUnit?.label?.trim()
+    ? `${linkedCase.property.name} (${linkedCase.propertyUnit.label.trim()})`
+    : linkedCase.property.name;
+
+  await Promise.all(
+    landlordMembers.map((member) =>
+      createPublicAccountNotification({
+        publicAccountId: member.publicAccountId,
+        notificationType: "PAYMENT_UPDATE",
+        title: "New payment submitted",
+        message: `A renter submitted ${paymentLabel} proof for ${locationLabel}. Review it in Payments.`,
+        ctaLabel: "Open payments",
+        ctaPath: "/account/payments",
+        metadata: {
+          linkedCaseId: linkedCase.id,
+          propertyId: linkedCase.propertyId,
+          paymentType: input.paymentType
+        } as Prisma.JsonObject
+      })
+    )
+  );
+
   return getRenterDashboard(input.publicAccountId);
 }
 
@@ -897,6 +1119,10 @@ export async function acceptRenterScoreRequest(input: { publicAccountId: string;
 
   if (!linkedCase) {
     throw new AppError("Linked landlord request was not found", 404, "NOT_FOUND");
+  }
+
+  if ((linkedCase as any).renterLinkResponseStatus !== "ACCEPTED") {
+    throw new AppError("Accept the property link first from Linked Properties", 400, "PROPERTY_LINK_NOT_ACCEPTED");
   }
 
   const latestRequest = linkedCase.scoreRequests[0] || null;
@@ -935,6 +1161,89 @@ export async function acceptRenterScoreRequest(input: { publicAccountId: string;
         } satisfies Prisma.JsonObject
       }
     });
+  });
+
+  return getRenterDashboard(input.publicAccountId);
+}
+
+export async function respondToLinkedProperty(input: {
+  publicAccountId: string;
+  linkedCaseId: string;
+  action: "ACCEPT" | "WITHDRAW";
+  note?: string;
+}) {
+  const account = await getRenterAccount(input.publicAccountId);
+
+  const linkedCase = await prisma.proposedRenter.findFirst({
+    where: {
+      id: input.linkedCaseId,
+      renterAccountId: input.publicAccountId
+    },
+    include: {
+      property: true,
+      propertyUnit: true
+    }
+  });
+
+  if (!linkedCase) {
+    throw new AppError("Linked property not found", 404, "LINKED_PROPERTY_NOT_FOUND");
+  }
+
+  const nextStatus = input.action === "ACCEPT" ? "ACCEPTED" : "WITHDRAWN";
+  if ((linkedCase as any).renterLinkResponseStatus === nextStatus) {
+    return getRenterDashboard(input.publicAccountId);
+  }
+  const currentResponseStatus = (linkedCase as any).renterLinkResponseStatus;
+  if (input.action === "ACCEPT" && currentResponseStatus !== "PENDING") {
+    throw new AppError("This property link has already been responded to", 400, "PROPERTY_LINK_ALREADY_RESPONDED");
+  }
+  if (input.action === "WITHDRAW") {
+    const canWithdraw = currentResponseStatus === "PENDING" || currentResponseStatus === "ACCEPTED";
+    if (!canWithdraw) {
+      throw new AppError("This property link can no longer be withdrawn", 400, "PROPERTY_LINK_ALREADY_RESPONDED");
+    }
+    if ((linkedCase as any).decision === "APPROVED" || (linkedCase as any).decision === "DECLINED") {
+      throw new AppError("This application already has a final landlord decision", 400, "PROPERTY_LINK_DECISION_FINAL");
+    }
+  }
+
+  const respondedAt = new Date();
+
+  await prisma.$transaction(async (tx) => {
+    await tx.proposedRenter.update({
+      where: { id: linkedCase.id },
+      data: {
+        renterLinkResponseStatus: nextStatus,
+        renterLinkRespondedAt: respondedAt,
+        renterLinkResponseNote: input.note?.trim() || null
+      } as any
+    });
+
+    await tx.proposedRenterActivity.create({
+      data: {
+        proposedRenterId: linkedCase.id,
+        actorAccountId: input.publicAccountId,
+        activityType: (input.action === "ACCEPT" ? "LINK_ACCEPTED" : "LINK_WITHDRAWN") as any,
+        message:
+          input.action === "ACCEPT"
+            ? "Renter accepted the property link request."
+            : "Renter withdrew from the property link request.",
+        metadata: {
+          responseStatus: nextStatus,
+          respondedAt: respondedAt.toISOString(),
+          note: input.note?.trim() || null
+        } satisfies Prisma.JsonObject
+      }
+    });
+  });
+
+  await notifyLinkedPropertyStakeholders({
+    linkedCaseId: linkedCase.id,
+    renterName: publicAccountDisplayName(account),
+    renterEmail: account.email,
+    propertyAddress: [linkedCase.property.address, linkedCase.property.city, linkedCase.property.state].filter(Boolean).join(", "),
+    responseStatus: nextStatus,
+    responseNote: input.note || null
   });
 
   return getRenterDashboard(input.publicAccountId);

@@ -17,6 +17,7 @@ import {
   listWorkspaceProperties,
   listWorkspaceQueue,
   requestWorkspaceRentScore,
+  respondToWorkspaceAgentInvite,
   respondToLandlordReferenceRequest,
   saveWorkspacePassportPhoto,
   searchWorkspaceAgents,
@@ -47,6 +48,7 @@ const propertySchema = z.object({
     bathroomCount: z.number().int().min(1).max(100),
     annualRentAmountNgn: z.number().int().positive().optional().nullable(),
     isOccupied: z.boolean().default(false),
+    availableForRentInMonths: z.number().int().min(1).max(24).optional().nullable(),
     currentTenantName: z.string().trim().max(160).optional(),
     currentTenantEmail: z.string().trim().email().optional().or(z.literal("")),
     currentTenantPhone: z.string().trim().max(40).optional()
@@ -70,11 +72,23 @@ const propertySchema = z.object({
         message: "Enter the current tenant phone number"
       });
     }
+
+    if (unit.availableForRentInMonths != null && unit.availableForRentInMonths < 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["units", index, "availableForRentInMonths"],
+        message: "Enter when this occupied unit will be available again"
+      });
+    }
   });
 });
 
 const sharePropertySchema = z.object({
   sharedWithEmail: z.string().email()
+});
+
+const agentInviteResponseSchema = z.object({
+  action: z.enum(["ACCEPT", "DECLINE"])
 });
 
 const proposedRenterSchema = z.object({
@@ -134,6 +148,7 @@ const updatePaymentScheduleSchema = z.object({
 const nigeriaPhoneSchema = z.string().trim().regex(/^(?:0\d{10}|\+234\d{10})$/, "Use 09052222022 or +2349052222022.");
 
 const confirmWorkspacePaymentSchema = z.object({
+  outcome: z.enum(["FULL", "PARTIAL"]),
   paidAt: z.coerce.date().nullable().optional(),
   note: z.string().trim().max(500).optional()
 });
@@ -161,7 +176,6 @@ const landlordReferenceResponseSchema = z.object({
 });
 
 const updateProfileSchema = z.object({
-  accountType: z.enum(["LANDLORD", "AGENT"]).optional(),
   representation: z.string().trim().max(120).optional().nullable(),
   firstName: z.string().trim().min(1).optional(),
   lastName: z.string().trim().min(1).optional(),
@@ -281,6 +295,21 @@ router.post("/workspace/properties/:propertyId/share", async (req, res, next) =>
     res.json(result);
   } catch (error) {
     next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid share request", 400, "VALIDATION_ERROR") : error);
+  }
+});
+
+router.post("/workspace/agent-invites/:inviteId/respond", async (req, res, next) => {
+  try {
+    const params = z.object({ inviteId: z.string().uuid() }).parse(req.params);
+    const body = agentInviteResponseSchema.parse(req.body);
+    const result = await respondToWorkspaceAgentInvite({
+      publicAccountId: req.user!.userId,
+      inviteId: params.inviteId,
+      action: body.action
+    });
+    res.json(result);
+  } catch (error) {
+    next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid agent invite response", 400, "VALIDATION_ERROR") : error);
   }
 });
 
@@ -518,6 +547,7 @@ router.post("/workspace/payment-schedules/:paymentScheduleId/confirm", async (re
     const result = await confirmWorkspacePaymentSchedule({
       publicAccountId: req.user!.userId,
       paymentScheduleId: params.paymentScheduleId,
+      outcome: body.outcome,
       paidAt: body.paidAt,
       note: body.note
     });

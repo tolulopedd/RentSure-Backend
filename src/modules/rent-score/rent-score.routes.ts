@@ -20,9 +20,11 @@ import {
   getAuthenticatedRenterScore,
   getRentScoreConfig,
   getRenterScoreDetails,
+  listPendingIdentityReviews,
   listRentScoreRules,
   listRenterScores,
   recordRentScoreEvent,
+  reviewIdentitySubmission,
   updateRentScoreCategory,
   updateRentScoreRule
 } from "./rent-score.service";
@@ -58,6 +60,55 @@ const ruleUpdateSchema = z.object({
   name: z.string().trim().min(2).max(160).optional(),
   points: z.number().int().min(-900).max(900).optional()
 });
+
+const identityReviewActionSchema = z.object({
+  action: z.enum(["APPROVE", "FAIL"]),
+  comment: z.string().trim().max(500).optional()
+});
+
+router.get(
+  "/admin/identity-reviews",
+  requireAuth,
+  requireRole("ADMIN"),
+  async (_req, res, next) => {
+    try {
+      const result = await listPendingIdentityReviews();
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+router.post(
+  "/admin/identity-reviews/:publicAccountId",
+  requireAuth,
+  requireRole("ADMIN"),
+  async (req, res, next) => {
+    try {
+      const params = z.object({ publicAccountId: z.string().uuid() }).parse(req.params);
+      const body = identityReviewActionSchema.parse(req.body);
+      const result = await reviewIdentitySubmission({
+        publicAccountId: params.publicAccountId,
+        reviewerUserId: req.user!.userId,
+        action: body.action,
+        comment: body.comment
+      });
+
+      await writeAuditLog({
+        req,
+        action: "identity.review",
+        entity: "PublicAccount",
+        entityId: params.publicAccountId,
+        meta: body
+      });
+
+      res.json(result);
+    } catch (error) {
+      next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid identity review payload", 400, "VALIDATION_ERROR") : error);
+    }
+  }
+);
 
 router.get(
   "/admin/rent-score/setup",

@@ -1,6 +1,9 @@
 import type { Prisma, PublicAccountStatus, RentScoreOverrideScope } from "@prisma/client";
 import { prisma } from "../../prisma/client";
 import { AppError } from "../../common/errors/AppError";
+import { env } from "../../config/env";
+import { renderTransactionalEmail } from "../mail/mail-templates";
+import { sendTransactionalMail } from "../mail/mail.service";
 
 const DEFAULT_POLICY_CODE = "DEFAULT";
 const REGISTRATION_RULE_CODE = "REGISTRATION_COMPLETED";
@@ -74,6 +77,40 @@ type DefaultRuleDefinition = {
 };
 
 type RentScoreSnapshot = Awaited<ReturnType<typeof buildRentScoreSnapshot>>;
+type DbClient = typeof prisma | Prisma.TransactionClient;
+
+function publicAccountDisplayName(account: {
+  firstName?: string | null;
+  lastName?: string | null;
+  organizationName?: string | null;
+  email?: string | null;
+}) {
+  if (account.organizationName?.trim()) return account.organizationName.trim();
+  const name = [account.firstName, account.lastName].filter(Boolean).join(" ").trim();
+  return name || account.email || "RentSure user";
+}
+
+async function createPublicAccountNotification(input: {
+  publicAccountId: string;
+  notificationType: "IDENTITY_REVIEW";
+  title: string;
+  message: string;
+  ctaLabel?: string;
+  ctaPath?: string;
+  metadata?: Prisma.JsonObject;
+}) {
+  await prisma.publicAccountNotification.create({
+    data: {
+      publicAccountId: input.publicAccountId,
+      notificationType: input.notificationType,
+      title: input.title,
+      message: input.message,
+      ctaLabel: input.ctaLabel ?? null,
+      ctaPath: input.ctaPath ?? null,
+      metadata: input.metadata
+    }
+  });
+}
 
 const defaultRuleDefinitions: DefaultRuleDefinition[] = [
   {
@@ -352,7 +389,6 @@ const defaultRuleDefinitions: DefaultRuleDefinition[] = [
 
 const DEFAULT_RULE_CODES = new Set(defaultRuleDefinitions.map((rule) => rule.code));
 
-type DbClient = any;
 type ScoreBand = "STRONG" | "STABLE" | "WATCH" | "RISK";
 
 function normalizeRuleCode(raw: string) {
@@ -405,6 +441,7 @@ function latestRelevantSchedule(
   schedules: Array<{
     dueDate: Date;
     status: string;
+    confirmationOutcome?: "FULL" | "PARTIAL" | null;
     paidAt?: Date | null;
     confirmedAt?: Date | null;
     confirmedByRenterAt?: Date | null;
@@ -412,7 +449,9 @@ function latestRelevantSchedule(
   now: Date
 ) {
   return schedules
-    .filter((schedule) => schedule.status === "PAID" || schedule.dueDate <= now)
+    .filter(
+      (schedule) => schedule.status === "PAID" || schedule.confirmationOutcome === "PARTIAL" || schedule.dueDate <= now
+    )
     .sort((left, right) => right.dueDate.getTime() - left.dueDate.getTime())[0] ?? null;
 }
 
@@ -445,8 +484,64 @@ function paymentScoreFromLatestSchedule(
   return 0;
 }
 
+function paymentRuleCodeFromLatestSchedule(
+  schedule: {
+    dueDate: Date;
+    status: string;
+    paidAt?: Date | null;
+    confirmedAt?: Date | null;
+    confirmedByRenterAt?: Date | null;
+  } | null,
+  input: {
+    onTimeRuleCode: string;
+    withinGraceRuleCode: string;
+    missedRuleCode: string;
+    gracePeriodDays: number;
+  }
+) {
+  if (!schedule || schedule.status !== "PAID") {
+    return schedule ? input.missedRuleCode : null;
+  }
+
+  const paidAt = schedule.paidAt ?? schedule.confirmedAt ?? schedule.confirmedByRenterAt;
+  if (!paidAt) {
+    return input.missedRuleCode;
+  }
+
+  const daysLate = wholeDaysLate(schedule.dueDate, paidAt);
+  if (daysLate <= 0) return input.onTimeRuleCode;
+  if (daysLate <= input.gracePeriodDays) return input.withinGraceRuleCode;
+  return input.missedRuleCode;
+}
+
+function configuredRuleMap(
+  rules: Array<{ code: string; points: number; isActive: boolean; name: string; description: string }>
+) {
+  return new Map(rules.map((rule) => [rule.code, rule] as const));
+}
+
+function configuredContribution(
+  rule:
+    | {
+        code: string;
+        points: number;
+        isActive: boolean;
+        name: string;
+        description: string;
+      }
+    | null
+    | undefined,
+  isApplied: boolean
+) {
+  if (!rule || !rule.isActive || !isApplied) return 0;
+  return rule.points;
+}
+
 function getLatestEventByCodes(
-  events: Array<{ occurredAt: Date; rule: { code: string; points: number; name: string } }>,
+  events: Array<{
+    occurredAt: Date;
+    rule: { code: string; points: number; name: string; description?: string | null; isActive?: boolean };
+  }>,
   codes: readonly string[]
 ) {
   return events.find((event) => codes.includes(event.rule.code));
@@ -751,6 +846,15 @@ async function resolveRenterAccount(publicAccountId: string, tx: DbClient = pris
 
 export async function buildRentScoreSnapshot(publicAccountId: string, tx: DbClient = prisma) {
   const policy = await resolvePolicy(tx);
+  const ruleMap = configuredRuleMap(
+    (policy.rules || []).map((rule: any) => ({
+      code: rule.code,
+      points: rule.points,
+      isActive: rule.isActive,
+      name: rule.name,
+      description: rule.description || ""
+    }))
+  );
   const categoryConfigs: Array<{
     code: string;
     name: string;
@@ -818,98 +922,111 @@ export async function buildRentScoreSnapshot(publicAccountId: string, tx: DbClie
   const rentSchedules = allSchedules.filter((schedule: any) => schedule.paymentType === "RENT");
   const utilitySchedules = allSchedules.filter((schedule: any) => schedule.paymentType === "UTILITY");
   const now = new Date();
+  const accountCreatedRule = ruleMap.get(REGISTRATION_RULE_CODE) ?? null;
+  const emailVerifiedRule = ruleMap.get("EMAIL_VERIFIED") ?? null;
+  const phoneUpdatedRule = ruleMap.get(PHONE_UPDATED_RULE_CODE) ?? null;
+  const governmentIdRule = ruleMap.get(GOVERNMENT_ID_RULE_CODE) ?? null;
+  const completeProfileRule = ruleMap.get(PROFILE_COMPLETED_RULE_CODE) ?? null;
+  const hasPhone = hasValue(account.phone);
+  const profileComplete = isProfileComplete(account);
+  const identityApproved = account.identityReviewStatus === "APPROVED";
 
   const identityBreakdown = [
     {
       ruleId: "category:identity:account-created",
       code: REGISTRATION_RULE_CODE,
-      name: "Account created",
-      description: "Renter account has been created on RentSure.",
-      points: 20,
+      name: accountCreatedRule?.name ?? "Account created",
+      description: accountCreatedRule?.description || "Renter account has been created on RentSure.",
+      points: accountCreatedRule?.points ?? 0,
       maxOccurrences: 1,
-      isActive: true,
-      quantity: 1,
-      appliedOccurrences: 1,
-      contribution: 20,
-      lastOccurredAt: account.createdAt
+      isActive: accountCreatedRule?.isActive ?? true,
+      quantity: account.emailVerifiedAt ? 1 : 0,
+      appliedOccurrences: account.emailVerifiedAt ? 1 : 0,
+      contribution: configuredContribution(accountCreatedRule, Boolean(account.emailVerifiedAt)),
+      lastOccurredAt: account.emailVerifiedAt ?? null
     },
     {
       ruleId: "category:identity:email-verified",
       code: "EMAIL_VERIFIED",
-      name: "Email verified",
-      description: "Renter has verified the account email address.",
-      points: 20,
+      name: emailVerifiedRule?.name ?? "Email verified",
+      description: emailVerifiedRule?.description || "Renter has verified the account email address.",
+      points: emailVerifiedRule?.points ?? 0,
       maxOccurrences: 1,
-      isActive: true,
+      isActive: emailVerifiedRule?.isActive ?? true,
       quantity: account.emailVerifiedAt ? 1 : 0,
       appliedOccurrences: account.emailVerifiedAt ? 1 : 0,
-      contribution: account.emailVerifiedAt ? 20 : 0,
+      contribution: configuredContribution(emailVerifiedRule, Boolean(account.emailVerifiedAt)),
       lastOccurredAt: account.emailVerifiedAt ?? null
     },
     {
       ruleId: "category:identity:phone-updated",
       code: PHONE_UPDATED_RULE_CODE,
-      name: "Phone updated",
-      description: "Renter has provided a phone number on the profile.",
-      points: 20,
+      name: phoneUpdatedRule?.name ?? "Phone updated",
+      description: phoneUpdatedRule?.description || "Renter has provided a phone number on the profile.",
+      points: phoneUpdatedRule?.points ?? 0,
       maxOccurrences: 1,
-      isActive: true,
-      quantity: hasValue(account.phone) ? 1 : 0,
-      appliedOccurrences: hasValue(account.phone) ? 1 : 0,
-      contribution: hasValue(account.phone) ? 20 : 0,
-      lastOccurredAt: hasValue(account.phone) ? account.updatedAt : null
+      isActive: phoneUpdatedRule?.isActive ?? true,
+      quantity: hasPhone ? 1 : 0,
+      appliedOccurrences: hasPhone ? 1 : 0,
+      contribution: configuredContribution(phoneUpdatedRule, hasPhone),
+      lastOccurredAt: hasPhone ? account.updatedAt : null
     },
     {
       ruleId: "category:identity:government-id",
       code: GOVERNMENT_ID_RULE_CODE,
-      name: "Government ID verified",
-      description: "Renter has verified NIN or BVN.",
-      points: 20,
+      name: governmentIdRule?.name ?? "Government ID verified",
+      description: governmentIdRule?.description || "Renter identity has been reviewed and approved by RentSure.",
+      points: governmentIdRule?.points ?? 0,
       maxOccurrences: 1,
-      isActive: true,
-      quantity: account.ninVerifiedAt || account.bvnVerifiedAt ? 1 : 0,
-      appliedOccurrences: account.ninVerifiedAt || account.bvnVerifiedAt ? 1 : 0,
-      contribution: account.ninVerifiedAt || account.bvnVerifiedAt ? 20 : 0,
-      lastOccurredAt: account.ninVerifiedAt ?? account.bvnVerifiedAt ?? null
+      isActive: governmentIdRule?.isActive ?? true,
+      quantity: identityApproved ? 1 : 0,
+      appliedOccurrences: identityApproved ? 1 : 0,
+      contribution: configuredContribution(governmentIdRule, identityApproved),
+      lastOccurredAt: account.identityReviewedAt ?? null
     },
     {
       ruleId: "category:identity:complete-profile",
       code: PROFILE_COMPLETED_RULE_CODE,
-      name: "Complete profile",
-      description: "Renter profile has complete core identity and address details.",
-      points: 20,
+      name: completeProfileRule?.name ?? "Complete profile",
+      description: completeProfileRule?.description || "Renter profile has complete core identity and address details.",
+      points: completeProfileRule?.points ?? 0,
       maxOccurrences: 1,
-      isActive: true,
-      quantity: isProfileComplete(account) ? 1 : 0,
-      appliedOccurrences: isProfileComplete(account) ? 1 : 0,
-      contribution: isProfileComplete(account) ? 20 : 0,
-      lastOccurredAt: isProfileComplete(account) ? account.updatedAt : null
+      isActive: completeProfileRule?.isActive ?? true,
+      quantity: profileComplete ? 1 : 0,
+      appliedOccurrences: profileComplete ? 1 : 0,
+      contribution: configuredContribution(completeProfileRule, profileComplete),
+      lastOccurredAt: profileComplete ? account.updatedAt : null
     }
   ];
-  const identityScore = identityBreakdown.reduce((sum, item) => sum + item.contribution, 0);
 
   const latestRentSchedule = latestRelevantSchedule(rentSchedules, now);
   const latestUtilitySchedule = latestRelevantSchedule(utilitySchedules, now);
-  const rentPaymentScore = paymentScoreFromLatestSchedule(latestRentSchedule, {
-    onTimePoints: 200,
-    withinGracePoints: 150,
+  const rentPaymentRuleCode = paymentRuleCodeFromLatestSchedule(latestRentSchedule, {
+    onTimeRuleCode: "RENT_PAID_ON_OR_BEFORE_DUE_DATE",
+    withinGraceRuleCode: "RENT_PAID_WITHIN_GRACE_PERIOD",
+    missedRuleCode: RENT_MISSED_RULE_CODE,
     gracePeriodDays: 60
   });
-  const utilityPaymentScore = paymentScoreFromLatestSchedule(latestUtilitySchedule, {
-    onTimePoints: 100,
-    withinGracePoints: 50,
+  const utilityPaymentRuleCode = paymentRuleCodeFromLatestSchedule(latestUtilitySchedule, {
+    onTimeRuleCode: "UTILITY_PAID_ON_TIME",
+    withinGraceRuleCode: "UTILITY_PAID_WITHIN_GRACE_PERIOD",
+    missedRuleCode: UTILITY_MISSED_RULE_CODE,
     gracePeriodDays: 60
   });
+  const rentPaymentRule = rentPaymentRuleCode ? ruleMap.get(rentPaymentRuleCode) ?? null : null;
+  const utilityPaymentRule = utilityPaymentRuleCode ? ruleMap.get(utilityPaymentRuleCode) ?? null : null;
+  const rentPaymentScore = rentPaymentRule?.isActive ? rentPaymentRule.points : 0;
+  const utilityPaymentScore = utilityPaymentRule?.isActive ? utilityPaymentRule.points : 0;
 
   const paymentBreakdown = [
     {
       ruleId: "category:payment:rent",
-      code: "RENT_PAYMENT_HISTORY",
-      name: "Payment of rent",
-      description: "Latest rent payment status based on due date and grace period.",
-      points: 200,
+      code: rentPaymentRule?.code ?? "RENT_PAYMENT_HISTORY",
+      name: rentPaymentRule?.name ?? "Payment of rent",
+      description: rentPaymentRule?.description || "Latest rent payment status based on due date and grace period.",
+      points: rentPaymentRule?.points ?? 0,
       maxOccurrences: 1,
-      isActive: true,
+      isActive: rentPaymentRule?.isActive ?? true,
       quantity: latestRentSchedule ? 1 : 0,
       appliedOccurrences: latestRentSchedule ? 1 : 0,
       contribution: rentPaymentScore,
@@ -917,12 +1034,12 @@ export async function buildRentScoreSnapshot(publicAccountId: string, tx: DbClie
     },
     {
       ruleId: "category:payment:utility",
-      code: "UTILITY_PAYMENT_HISTORY",
-      name: "Utility payment",
-      description: "Latest utility payment status based on due date and grace period.",
-      points: 100,
+      code: utilityPaymentRule?.code ?? "UTILITY_PAYMENT_HISTORY",
+      name: utilityPaymentRule?.name ?? "Utility payment",
+      description: utilityPaymentRule?.description || "Latest utility payment status based on due date and grace period.",
+      points: utilityPaymentRule?.points ?? 0,
       maxOccurrences: 1,
-      isActive: true,
+      isActive: utilityPaymentRule?.isActive ?? true,
       quantity: latestUtilitySchedule ? 1 : 0,
       appliedOccurrences: latestUtilitySchedule ? 1 : 0,
       contribution: utilityPaymentScore,
@@ -937,11 +1054,11 @@ export async function buildRentScoreSnapshot(publicAccountId: string, tx: DbClie
     {
       ruleId: "category:behaviour:property-maintenance",
       code: latestPropertyMaintenanceEvent?.rule.code ?? "PROPERTY_MAINTENANCE_UNSET",
-      name: "Property maintenance",
-      description: "Latest landlord property maintenance rating.",
-      points: 100,
+      name: latestPropertyMaintenanceEvent?.rule.name ?? "Property maintenance",
+      description: latestPropertyMaintenanceEvent?.rule.description || "Latest landlord property maintenance rating.",
+      points: latestPropertyMaintenanceEvent?.rule.points ?? 0,
       maxOccurrences: 1,
-      isActive: true,
+      isActive: latestPropertyMaintenanceEvent?.rule.isActive ?? true,
       quantity: latestPropertyMaintenanceEvent ? 1 : 0,
       appliedOccurrences: latestPropertyMaintenanceEvent ? 1 : 0,
       contribution: latestPropertyMaintenanceEvent?.rule.points ?? 0,
@@ -950,11 +1067,11 @@ export async function buildRentScoreSnapshot(publicAccountId: string, tx: DbClie
     {
       ruleId: "category:behaviour:lease-compliance",
       code: latestLeaseComplianceEvent?.rule.code ?? "LEASE_COMPLIANCE_UNSET",
-      name: "General lease compliance",
-      description: "Latest landlord lease compliance rating.",
-      points: 100,
+      name: latestLeaseComplianceEvent?.rule.name ?? "General lease compliance",
+      description: latestLeaseComplianceEvent?.rule.description || "Latest landlord lease compliance rating.",
+      points: latestLeaseComplianceEvent?.rule.points ?? 0,
       maxOccurrences: 1,
-      isActive: true,
+      isActive: latestLeaseComplianceEvent?.rule.isActive ?? true,
       quantity: latestLeaseComplianceEvent ? 1 : 0,
       appliedOccurrences: latestLeaseComplianceEvent ? 1 : 0,
       contribution: latestLeaseComplianceEvent?.rule.points ?? 0,
@@ -962,45 +1079,49 @@ export async function buildRentScoreSnapshot(publicAccountId: string, tx: DbClie
     }
   ];
 
-  const rentalStabilityScore =
+  const rentalStabilityRuleCode =
     account.residenceMoveCount5y == null
-      ? 0
+      ? null
       : account.residenceMoveCount5y <= 1
-        ? 100
+        ? "RENTAL_STABILITY_1_MOVE"
         : account.residenceMoveCount5y === 2
-          ? 60
-          : 0;
+          ? "RENTAL_STABILITY_2_MOVES"
+          : "RENTAL_STABILITY_3_PLUS_MOVES";
+  const rentalStabilityRule = rentalStabilityRuleCode ? ruleMap.get(rentalStabilityRuleCode) ?? null : null;
 
-  const employmentStabilityScore =
+  const employmentStabilityRuleCode =
     account.employmentType == null || account.employmentYears == null
-      ? 0
+      ? null
       : account.employmentType === "EMPLOYED"
         ? account.employmentYears <= 1
-          ? 100
+          ? "EMPLOYED_1_YEAR"
           : account.employmentYears === 2
-            ? 60
-            : 0
+            ? "EMPLOYED_2_YEARS"
+            : "EMPLOYED_3_PLUS_YEARS"
         : account.employmentYears >= 5
-          ? 100
+          ? "SELF_EMPLOYED_5_PLUS_YEARS"
           : account.employmentYears >= 3
-            ? 60
-            : 0;
+            ? "SELF_EMPLOYED_3_TO_4_YEARS"
+            : "SELF_EMPLOYED_UNDER_3_YEARS";
+  const employmentStabilityRule = employmentStabilityRuleCode ? ruleMap.get(employmentStabilityRuleCode) ?? null : null;
 
   const latestLandlordReferenceEvent = getLatestEventByCodes(events, LANDLORD_REFERENCE_CODES);
   const landlordReferenceScore = latestLandlordReferenceEvent ? latestLandlordReferenceEvent.rule.points : 0;
 
   const latestLinkedUnitWithRent = linkedCases.find((item: any) => item.propertyUnit?.annualRentAmountNgn != null)?.propertyUnit ?? null;
   const annualRentAmountNgn = latestLinkedUnitWithRent?.annualRentAmountNgn ?? null;
-  const renterBandScore =
+  const renterBandRuleCode =
     annualRentAmountNgn == null
-      ? 0
+      ? null
       : annualRentAmountNgn < 500_000
-        ? 25
+        ? "RENTER_BAND_D"
         : annualRentAmountNgn <= 1_000_000
-          ? 50
+          ? "RENTER_BAND_C"
           : annualRentAmountNgn <= 2_500_000
-            ? 75
-            : 100;
+            ? "RENTER_BAND_B"
+            : "RENTER_BAND_A";
+  const renterBandRule = renterBandRuleCode ? ruleMap.get(renterBandRuleCode) ?? null : null;
+  const renterBandScore = configuredContribution(renterBandRule, annualRentAmountNgn != null);
 
   const baseBreakdown = [
     ...identityBreakdown.map((item) => ({ ...item, categoryCode: "IDENTITY_VERIFICATION" as const })),
@@ -1008,41 +1129,44 @@ export async function buildRentScoreSnapshot(publicAccountId: string, tx: DbClie
     ...behaviourBreakdown.map((item) => ({ ...item, categoryCode: "RENTER_BEHAVIOUR" as const })),
     {
       ruleId: "category:rental-stability",
-      code: "RENTAL_STABILITY",
+      code: rentalStabilityRule?.code ?? "RENTAL_STABILITY",
       categoryCode: "RENTAL_STABILITY" as const,
-      name: "Rental stability",
-      description: "Number of moves supplied for the last five years.",
-      points: 100,
+      name: rentalStabilityRule?.name ?? "Rental stability",
+      description: rentalStabilityRule?.description || "Number of moves supplied for the last five years.",
+      points: rentalStabilityRule?.points ?? 0,
       maxOccurrences: 1,
-      isActive: true,
+      isActive: rentalStabilityRule?.isActive ?? true,
       quantity: account.residenceMoveCount5y ?? 0,
       appliedOccurrences: account.residenceMoveCount5y == null ? 0 : 1,
-      contribution: rentalStabilityScore,
+      contribution: configuredContribution(rentalStabilityRule, account.residenceMoveCount5y != null),
       lastOccurredAt: account.residenceMoveCount5y == null ? null : account.updatedAt
     },
     {
       ruleId: "category:employment-stability",
-      code: "EMPLOYMENT_STABILITY",
+      code: employmentStabilityRule?.code ?? "EMPLOYMENT_STABILITY",
       categoryCode: "EMPLOYMENT_STABILITY" as const,
-      name: "Employment / business stability",
-      description: "Employment type and years supplied on the renter profile.",
-      points: 100,
+      name: employmentStabilityRule?.name ?? "Employment / business stability",
+      description: employmentStabilityRule?.description || "Employment type and years supplied on the renter profile.",
+      points: employmentStabilityRule?.points ?? 0,
       maxOccurrences: 1,
-      isActive: true,
+      isActive: employmentStabilityRule?.isActive ?? true,
       quantity: account.employmentYears ?? 0,
       appliedOccurrences: account.employmentType == null || account.employmentYears == null ? 0 : 1,
-      contribution: employmentStabilityScore,
+      contribution: configuredContribution(
+        employmentStabilityRule,
+        account.employmentType != null && account.employmentYears != null
+      ),
       lastOccurredAt: account.employmentType == null || account.employmentYears == null ? null : account.updatedAt
     },
     {
       ruleId: "category:landlord-reference",
       code: latestLandlordReferenceEvent?.rule.code ?? "LANDLORD_REFERENCE_UNSET",
       categoryCode: "LANDLORD_REFERENCE" as const,
-      name: "Landlord reference",
-      description: "Latest verified current or previous landlord reference.",
-      points: 100,
+      name: latestLandlordReferenceEvent?.rule.name ?? "Landlord reference",
+      description: latestLandlordReferenceEvent?.rule.description || "Latest verified current or previous landlord reference.",
+      points: latestLandlordReferenceEvent?.rule.points ?? 0,
       maxOccurrences: 1,
-      isActive: true,
+      isActive: latestLandlordReferenceEvent?.rule.isActive ?? true,
       quantity: latestLandlordReferenceEvent ? 1 : 0,
       appliedOccurrences: latestLandlordReferenceEvent ? 1 : 0,
       contribution: landlordReferenceScore,
@@ -1050,13 +1174,13 @@ export async function buildRentScoreSnapshot(publicAccountId: string, tx: DbClie
     },
     {
       ruleId: "category:renter-band",
-      code: "RENTER_BAND",
+      code: renterBandRule?.code ?? "RENTER_BAND",
       categoryCode: "RENTER_BAND" as const,
-      name: "Renter band",
-      description: "Band derived from the annual rent amount of the linked property unit.",
-      points: 100,
+      name: renterBandRule?.name ?? "Renter band",
+      description: renterBandRule?.description || "Band derived from the annual rent amount of the linked property unit.",
+      points: renterBandRule?.points ?? 0,
       maxOccurrences: 1,
-      isActive: true,
+      isActive: renterBandRule?.isActive ?? true,
       quantity: annualRentAmountNgn == null ? 0 : annualRentAmountNgn,
       appliedOccurrences: annualRentAmountNgn == null ? 0 : 1,
       contribution: renterBandScore,
@@ -1802,6 +1926,156 @@ export async function listRenterScores(input: { q?: string; status?: PublicAccou
       scoreRequestCount
     }
   };
+}
+
+export async function listPendingIdentityReviews() {
+  const accounts = await prisma.publicAccount.findMany({
+    where: {
+      accountType: "RENTER",
+      identityReviewStatus: "PENDING",
+      identitySubmittedAt: { not: null }
+    },
+    orderBy: { identitySubmittedAt: "asc" }
+  });
+
+  return {
+    items: accounts.map((account) => ({
+      accountId: account.id,
+      name: publicAccountDisplayName(account),
+      email: account.email,
+      phone: account.phone,
+      state: account.state,
+      city: account.city,
+      address: account.address,
+      identityVerificationType: account.identityVerificationType,
+      maskedValue:
+        account.identityVerificationType === "NIN"
+          ? maskIdentityValue(account.nin)
+          : maskIdentityValue(account.bvn),
+      submittedAt: account.identitySubmittedAt,
+      createdAt: account.createdAt
+    }))
+  };
+}
+
+function maskIdentityValue(value?: string | null) {
+  if (!value) return null;
+  if (value.length <= 4) return value;
+  return `${"*".repeat(Math.max(0, value.length - 4))}${value.slice(-4)}`;
+}
+
+export async function reviewIdentitySubmission(input: {
+  publicAccountId: string;
+  reviewerUserId: string;
+  action: "APPROVE" | "FAIL";
+  comment?: string;
+}) {
+  const account = await prisma.publicAccount.findUnique({
+    where: { id: input.publicAccountId }
+  });
+
+  if (!account || account.accountType !== "RENTER") {
+    throw new AppError("Renter account not found", 404, "RENTER_NOT_FOUND");
+  }
+
+  if (account.identityReviewStatus !== "PENDING" || !account.identitySubmittedAt || !account.identityVerificationType) {
+    throw new AppError("No pending identity review found for this renter", 409, "IDENTITY_REVIEW_NOT_PENDING");
+  }
+
+  if (input.action === "FAIL" && !input.comment?.trim()) {
+    throw new AppError("A review comment is required when identity verification fails", 400, "VALIDATION_ERROR");
+  }
+
+  const reviewedAt = new Date();
+
+  await prisma.$transaction(async (tx) => {
+    await tx.publicAccount.update({
+      where: { id: account.id },
+      data:
+        input.action === "APPROVE"
+          ? {
+              identityReviewStatus: "APPROVED",
+              identityReviewedAt: reviewedAt,
+              identityReviewedByUserId: input.reviewerUserId,
+              identityReviewComment: null,
+              ...(account.identityVerificationType === "NIN"
+                ? { ninVerifiedAt: reviewedAt }
+                : { bvnVerifiedAt: reviewedAt })
+            }
+          : {
+              identityReviewStatus: "FAILED",
+              identityReviewedAt: reviewedAt,
+              identityReviewedByUserId: input.reviewerUserId,
+              identityReviewComment: input.comment?.trim() || null,
+              ...(account.identityVerificationType === "NIN"
+                ? { ninVerifiedAt: null }
+                : { bvnVerifiedAt: null })
+            }
+    });
+
+    await replaceRentScoreEventsByCodes({
+      publicAccountId: account.id,
+      tx,
+      codes: [GOVERNMENT_ID_RULE_CODE],
+      newEvent:
+        input.action === "APPROVE"
+          ? {
+              ruleCode: GOVERNMENT_ID_RULE_CODE,
+              occurredAt: reviewedAt,
+              recordedByUserId: input.reviewerUserId,
+              sourceNote: `${account.identityVerificationType} identity approved by admin`
+            }
+          : null
+    });
+  });
+
+  const title =
+    input.action === "APPROVE" ? "Identity approved" : "Identity review needs an update";
+  const message =
+    input.action === "APPROVE"
+      ? `Your ${account.identityVerificationType} has been approved. Your renter profile and rent score have been updated.`
+      : `Your ${account.identityVerificationType} submission was not approved. ${input.comment?.trim()}`;
+
+  await createPublicAccountNotification({
+    publicAccountId: account.id,
+    notificationType: "IDENTITY_REVIEW",
+    title,
+    message,
+    ctaLabel: "Open",
+    ctaPath: "/account/renter/profile",
+    metadata: {
+      action: input.action,
+      verificationType: account.identityVerificationType,
+      comment: input.comment?.trim() || null
+    }
+  });
+
+  await sendTransactionalMail({
+    category: "RENTER_NOTIFICATION",
+    to: account.email,
+    subject: input.action === "APPROVE" ? "Your identity has been approved" : "Update your identity submission",
+    html: renderTransactionalEmail({
+      eyebrow: "Identity review",
+      title: input.action === "APPROVE" ? "Identity approved" : "Identity review update",
+      greeting: `Dear ${publicAccountDisplayName(account)},`,
+      paragraphs:
+        input.action === "APPROVE"
+          ? [
+              `Your ${account.identityVerificationType} has been reviewed and approved by the RentSure team.`,
+              "Your renter profile now reflects the approved identity check, and the related rent-score points have been applied."
+            ]
+          : [
+              `We reviewed your ${account.identityVerificationType} submission, but we could not approve it yet.`,
+              `Reason: ${input.comment?.trim()}`,
+              "Please return to your RentSure profile, correct the details, and submit the identity information again for review."
+            ],
+      ctaLabel: "Open",
+      ctaUrl: `${env.APP_WEB_BASE_URL}/account/renter/profile`,
+      closing: "Best regards,<br />RentSure Team"
+    })
+  });
+
+  return buildRentScoreSnapshot(account.id);
 }
 
 export async function getRenterScoreDetails(publicAccountId: string) {

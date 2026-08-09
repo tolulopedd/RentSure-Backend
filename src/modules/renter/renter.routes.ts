@@ -9,12 +9,13 @@ import {
   confirmRenterPayment,
   getRenterDashboard,
   initiateRenterPaymentConfirmation,
+  respondToLinkedProperty,
   saveRenterPassportPhoto,
   searchRenterShareRecipients,
   shareRenterScoreReport,
   requestLandlordReference,
   updateRenterProfile,
-  verifyRenterIdentity
+  submitRenterIdentityForReview
 } from "./renter.service";
 import { createRenterRentScorePaymentSession, verifyRenterRentScorePayment } from "../score-payments/score-payments.service";
 
@@ -84,6 +85,11 @@ const landlordReferenceRequestSchema = z.object({
   note: z.string().trim().max(500).optional()
 });
 
+const linkedPropertyResponseSchema = z.object({
+  action: z.enum(["ACCEPT", "WITHDRAW"]),
+  note: z.string().trim().max(500).optional()
+});
+
 const renterRentScorePaymentSessionSchema = z.object({
   provider: z.enum(["PAYSTACK", "FLUTTERWAVE", "MANUAL_TRANSFER"]),
   callbackPath: z.string().trim().min(1).max(240).optional()
@@ -141,7 +147,7 @@ router.post("/renter/profile/passport-photo", async (req, res, next) => {
 router.post("/renter/identity", async (req, res, next) => {
   try {
     const body = identitySchema.parse(req.body);
-    const result = await verifyRenterIdentity({
+    const result = await submitRenterIdentityForReview({
       publicAccountId: req.user!.userId,
       verificationType: body.verificationType,
       value: body.value
@@ -221,6 +227,22 @@ router.post("/renter/linked-cases/:linkedCaseId/accept-score-request", async (re
     res.json(result);
   } catch (error) {
     next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid score request acceptance", 400, "VALIDATION_ERROR") : error);
+  }
+});
+
+router.post("/renter/linked-cases/:linkedCaseId/respond-link", async (req, res, next) => {
+  try {
+    const params = z.object({ linkedCaseId: z.string().uuid() }).parse(req.params);
+    const body = linkedPropertyResponseSchema.parse(req.body);
+    const result = await respondToLinkedProperty({
+      publicAccountId: req.user!.userId,
+      linkedCaseId: params.linkedCaseId,
+      action: body.action,
+      note: body.note
+    });
+    res.json(result);
+  } catch (error) {
+    next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid linked property response", 400, "VALIDATION_ERROR") : error);
   }
 });
 

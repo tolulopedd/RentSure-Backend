@@ -41,9 +41,22 @@ enum PublicAccountStatus {
   DISABLED
 }
 
+enum IdentityReviewStatus {
+  NOT_SUBMITTED
+  PENDING
+  APPROVED
+  FAILED
+}
+
 enum PropertyMemberRole {
   LANDLORD
   AGENT
+}
+
+enum PropertyAgentInviteStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
 }
 
 enum ProposedRenterStatus {
@@ -52,6 +65,12 @@ enum ProposedRenterStatus {
   SCORE_SHARED
   UNDER_REVIEW
   DECISION_READY
+}
+
+enum ProposedRenterLinkResponseStatus {
+  PENDING
+  ACCEPTED
+  WITHDRAWN
 }
 
 enum ProposedRenterDecision {
@@ -63,6 +82,8 @@ enum ProposedRenterDecision {
 enum ProposedRenterActivityType {
   COMMENT
   CREATED
+  LINK_ACCEPTED
+  LINK_WITHDRAWN
   SCORE_REQUESTED
   SCORE_REQUEST_ACCEPTED
   SCORE_FORWARDED
@@ -92,6 +113,11 @@ enum PaymentScheduleStatus {
   OVERDUE
 }
 
+enum PaymentConfirmationOutcome {
+  FULL
+  PARTIAL
+}
+
 enum RenterScoreShareRecipientType {
   LANDLORD
   AGENT
@@ -108,7 +134,11 @@ enum PublicDocumentType {
 }
 
 enum PublicNotificationType {
+  AGENT_INVITE
   PROPERTY_LINKED
+  PROPERTY_LINK_RESPONSE
+  PAYMENT_UPDATE
+  IDENTITY_REVIEW
 }
 
 enum RentScorePaymentProvider {
@@ -162,6 +192,7 @@ model User {
   reportApprovedRentScorePayments RentScorePayment[] @relation("RentScorePaymentReportApprovedBy")
   rentScoreEvents RentScoreEvent[]
   createdRentScoreOverrides RentScoreOverride[] @relation("RentScoreOverrideCreatedBy")
+  reviewedIdentityAccounts PublicAccount[] @relation("PublicAccountIdentityReviewedBy")
 
   @@index([role])
   @@index([status])
@@ -180,12 +211,20 @@ model PublicAccount {
   ninVerifiedAt      DateTime?
   bvn                String?
   bvnVerifiedAt      DateTime?
+  identityVerificationType String?
+  identitySubmittedAt DateTime?
+  identityReviewStatus IdentityReviewStatus @default(NOT_SUBMITTED)
+  identityReviewedAt DateTime?
+  identityReviewedByUserId String?
+  identityReviewComment String?
   email              String                @unique
   passwordHash       String
   phone              String
   state              String
   city               String
   address            String
+  acceptedTermsAt    DateTime?
+  acceptedTermsVersion String?
   propertyCount      String?
   portfolioType      String?
   residenceMoveCount5y Int?
@@ -204,6 +243,8 @@ model PublicAccount {
   passwordResetTokens PasswordResetToken[]
   rentScoreEvents    RentScoreEvent[]
   linkedProperties   PropertyMember[]          @relation("PropertyMemberAccount")
+  receivedPropertyAgentInvites PropertyAgentInvite[] @relation("PropertyAgentInviteRecipient")
+  sentPropertyAgentInvites PropertyAgentInvite[] @relation("PropertyAgentInviteSender")
   createdProperties  Property[]                @relation("PropertyCreator")
   proposedRenters    ProposedRenter[]          @relation("ProposedRenterRequester")
   linkedRenterCases  ProposedRenter[]          @relation("LinkedRenterAccount")
@@ -223,11 +264,14 @@ model PublicAccount {
   landlordReferenceRequestsReceived LandlordReferenceRequest[] @relation("LandlordReferenceRequestLandlord")
   rentScoreOverrides RentScoreOverride[]
   passportPhotoDocument PublicAccountDocument? @relation("PublicAccountPassportPhoto", fields: [passportPhotoDocumentId], references: [id], onDelete: SetNull)
+  identityReviewedBy User? @relation("PublicAccountIdentityReviewedBy", fields: [identityReviewedByUserId], references: [id], onDelete: SetNull)
 
   @@index([accountType])
   @@index([entityType])
   @@index([status])
   @@index([passportPhotoDocumentId])
+  @@index([identityReviewStatus])
+  @@index([identityReviewedByUserId])
 }
 
 model PublicAccountDocument {
@@ -484,6 +528,7 @@ model Property {
 
   createdBy          PublicAccount    @relation("PropertyCreator", fields: [createdByAccountId], references: [id], onDelete: Cascade)
   members            PropertyMember[]
+  agentInvites       PropertyAgentInvite[]
   units              PropertyUnit[]
   proposedRenters    ProposedRenter[]
   paymentSchedules   PaymentSchedule[]
@@ -504,6 +549,7 @@ model PropertyUnit {
   bathroomCount      Int       @default(1)
   annualRentAmountNgn Int?
   isOccupied         Boolean   @default(false)
+  availableForRentInMonths Int?
   currentTenantName  String?
   currentTenantEmail String?
   currentTenantPhone String?
@@ -531,6 +577,28 @@ model PropertyMember {
   @@index([publicAccountId])
 }
 
+model PropertyAgentInvite {
+  id                    String             @id @default(uuid())
+  propertyId            String
+  invitedByAccountId    String
+  recipientEmail        String
+  recipientAccountId    String?
+  status                PropertyAgentInviteStatus @default(PENDING)
+  acceptedAt            DateTime?
+  respondedAt           DateTime?
+  createdAt             DateTime           @default(now())
+  updatedAt             DateTime           @updatedAt
+
+  property              Property           @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  invitedBy             PublicAccount      @relation("PropertyAgentInviteSender", fields: [invitedByAccountId], references: [id], onDelete: Cascade)
+  recipientAccount      PublicAccount?     @relation("PropertyAgentInviteRecipient", fields: [recipientAccountId], references: [id], onDelete: SetNull)
+
+  @@unique([propertyId, recipientEmail])
+  @@index([recipientEmail])
+  @@index([recipientAccountId])
+  @@index([invitedByAccountId])
+}
+
 model ProposedRenter {
   id                 String                @id @default(uuid())
   propertyId         String
@@ -546,6 +614,9 @@ model ProposedRenter {
   state              String
   city               String
   status             ProposedRenterStatus  @default(PROPOSED)
+  renterLinkResponseStatus ProposedRenterLinkResponseStatus @default(PENDING)
+  renterLinkRespondedAt DateTime?
+  renterLinkResponseNote String?
   decision           ProposedRenterDecision?
   decisionAt         DateTime?
   decisionByAccountId String?
@@ -656,6 +727,7 @@ model PaymentSchedule {
   confirmedAt        DateTime?
   confirmedByAccountId String?
   confirmationTiming String?
+  confirmationOutcome PaymentConfirmationOutcome?
   paidAt             DateTime?
   createdAt          DateTime               @default(now())
   updatedAt          DateTime               @updatedAt

@@ -146,13 +146,17 @@ router.post("/auth/complete-signup", async (req, res, next) => {
     const body = z
       .object({
         token: z.string().min(20),
-        password: strongPasswordSchema
+        password: strongPasswordSchema,
+        acceptedTerms: z.literal(true),
+        acceptedTermsVersion: z.string().trim().max(40).optional()
       })
       .parse(req.body);
 
     const result = await completePublicAccountSignup({
       rawToken: body.token,
-      password: body.password
+      password: body.password,
+      acceptedTerms: body.acceptedTerms,
+      acceptedTermsVersion: body.acceptedTermsVersion
     });
 
     await writeAuditLog({
