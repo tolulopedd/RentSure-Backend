@@ -8,7 +8,7 @@
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
     "prestart": "prisma generate",
     "start": "node dist/server.js",
-    "build": "tsc -p tsconfig.json",
+    "build": "prisma migrate deploy && tsc -p tsconfig.json",
     "lint": "tsc --noEmit",
     "prisma:gen": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
