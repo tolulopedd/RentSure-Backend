@@ -170,7 +170,17 @@ router.post("/auth/complete-signup", async (req, res, next) => {
 
     res.json(result);
   } catch (error) {
-    next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid signup completion payload", 400, "VALIDATION_ERROR") : error);
+    next(
+      error instanceof z.ZodError
+        ? new AppError(
+            error.issues.some((issue) => issue.path.join(".") === "acceptedTerms")
+              ? "Accept the Terms and Conditions before continuing."
+              : error.issues[0]?.message ?? "Invalid signup completion payload",
+            400,
+            "VALIDATION_ERROR"
+          )
+        : error
+    );
   }
 });
 

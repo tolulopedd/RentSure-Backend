@@ -18,7 +18,16 @@ router.get("/dev/mail-previews", (req, res, next) => {
       .object({
         email: z.string().trim().email().optional(),
         category: z
-          .enum(["EMAIL_VERIFICATION", "AGENT_INVITE", "PROPERTY_LINK_RESPONSE", "RENTER_INVITE", "RENTER_NOTIFICATION", "RENTER_SHARE_REPORT", "PASSWORD_RESET"])
+          .enum([
+            "EMAIL_VERIFICATION",
+            "AGENT_INVITE",
+            "PROPERTY_LINK_RESPONSE",
+            "RENTER_INVITE",
+            "RENTER_DECISION",
+            "RENTER_NOTIFICATION",
+            "RENTER_SHARE_REPORT",
+            "PASSWORD_RESET"
+          ])
           .optional(),
         limit: z.coerce.number().int().min(1).max(50).optional()
       })
