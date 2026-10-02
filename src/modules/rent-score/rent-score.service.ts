@@ -1,5 +1,6 @@
 import type { Prisma, PublicAccountStatus, RentScoreOverrideScope } from "@prisma/client";
 import { prisma } from "../../prisma/client";
+import { notifyUser } from "../notifications/notifications.service";
 import { AppError } from "../../common/errors/AppError";
 import { env } from "../../config/env";
 import { renderTransactionalEmail } from "../mail/mail-templates";
@@ -99,16 +100,15 @@ async function createPublicAccountNotification(input: {
   ctaPath?: string;
   metadata?: Prisma.JsonObject;
 }) {
-  await prisma.publicAccountNotification.create({
-    data: {
-      publicAccountId: input.publicAccountId,
-      notificationType: input.notificationType,
-      title: input.title,
-      message: input.message,
-      ctaLabel: input.ctaLabel ?? null,
-      ctaPath: input.ctaPath ?? null,
-      metadata: input.metadata
-    }
+  await notifyUser({
+    recipientAccountId: input.publicAccountId,
+    event: input.notificationType,
+    title: input.title,
+    message: input.message,
+    actionLabel: input.ctaLabel,
+    actionUrl: input.ctaPath,
+    metadata: input.metadata,
+    sendEmail: false
   });
 }
 
@@ -523,11 +523,11 @@ function configuredRuleMap(
 function configuredContribution(
   rule:
     | {
-        code: string;
-        points: number;
-        isActive: boolean;
-        name: string;
-        description: string;
+      code: string;
+      points: number;
+      isActive?: boolean;
+      name: string;
+      description?: string | null;
       }
     | null
     | undefined,
@@ -726,19 +726,13 @@ async function fetchPolicyWithRules(tx: DbClient) {
 export async function ensureDefaultRentScorePolicy(tx: DbClient = prisma) {
   const policy = await tx.rentScorePolicy.upsert({
     where: { code: DEFAULT_POLICY_CODE },
-    update: {
-      name: "Rent score default policy",
-      description: "Default RentSure rent score policy for renters.",
-      minScore: 0,
-      maxScore: 1000,
-      isActive: true
-    },
+    update: {},
     create: {
       code: DEFAULT_POLICY_CODE,
       name: "Rent score default policy",
       description: "Default RentSure rent score policy for renters.",
       minScore: 0,
-      maxScore: 1000,
+      maxScore: 900,
       isActive: true
     }
   });
@@ -752,12 +746,7 @@ export async function ensureDefaultRentScorePolicy(tx: DbClient = prisma) {
             code: category.code
           }
         },
-        update: {
-          name: category.name,
-          maxScore: category.maxScore,
-          sortOrder: category.sortOrder,
-          isActive: true
-        },
+        update: {},
         create: {
           policyId: policy.id,
           code: category.code,
@@ -779,15 +768,7 @@ export async function ensureDefaultRentScorePolicy(tx: DbClient = prisma) {
             code: rule.code
           }
         },
-        update: {
-          name: rule.name,
-          description: rule.description,
-          points: rule.points,
-          maxOccurrences: rule.maxOccurrences ?? null,
-          sortOrder: rule.sortOrder,
-          metadata: rule.metadata,
-          isActive: true
-        },
+        update: {},
         create: {
           policyId: policy.id,
           code: rule.code,
@@ -1061,7 +1042,7 @@ export async function buildRentScoreSnapshot(publicAccountId: string, tx: DbClie
       isActive: latestPropertyMaintenanceEvent?.rule.isActive ?? true,
       quantity: latestPropertyMaintenanceEvent ? 1 : 0,
       appliedOccurrences: latestPropertyMaintenanceEvent ? 1 : 0,
-      contribution: latestPropertyMaintenanceEvent?.rule.points ?? 0,
+      contribution: configuredContribution(latestPropertyMaintenanceEvent?.rule, Boolean(latestPropertyMaintenanceEvent)),
       lastOccurredAt: latestPropertyMaintenanceEvent?.occurredAt ?? null
     },
     {
@@ -1074,7 +1055,7 @@ export async function buildRentScoreSnapshot(publicAccountId: string, tx: DbClie
       isActive: latestLeaseComplianceEvent?.rule.isActive ?? true,
       quantity: latestLeaseComplianceEvent ? 1 : 0,
       appliedOccurrences: latestLeaseComplianceEvent ? 1 : 0,
-      contribution: latestLeaseComplianceEvent?.rule.points ?? 0,
+      contribution: configuredContribution(latestLeaseComplianceEvent?.rule, Boolean(latestLeaseComplianceEvent)),
       lastOccurredAt: latestLeaseComplianceEvent?.occurredAt ?? null
     }
   ];
@@ -1106,7 +1087,10 @@ export async function buildRentScoreSnapshot(publicAccountId: string, tx: DbClie
   const employmentStabilityRule = employmentStabilityRuleCode ? ruleMap.get(employmentStabilityRuleCode) ?? null : null;
 
   const latestLandlordReferenceEvent = getLatestEventByCodes(events, LANDLORD_REFERENCE_CODES);
-  const landlordReferenceScore = latestLandlordReferenceEvent ? latestLandlordReferenceEvent.rule.points : 0;
+  const landlordReferenceScore = configuredContribution(
+    latestLandlordReferenceEvent?.rule,
+    Boolean(latestLandlordReferenceEvent)
+  );
 
   const latestLinkedUnitWithRent = linkedCases.find((item: any) => item.propertyUnit?.annualRentAmountNgn != null)?.propertyUnit ?? null;
   const annualRentAmountNgn = latestLinkedUnitWithRent?.annualRentAmountNgn ?? null;
@@ -1219,7 +1203,7 @@ export async function buildRentScoreSnapshot(publicAccountId: string, tx: DbClie
 
   const configuredMaxScore = categoryBreakdown.reduce((total: number, item: any) => total + item.maxScore, 0);
   const rawScore = categoryBreakdown.reduce((total: number, item: any) => total + item.score, 0);
-  const score = clampScore(rawScore, policy.minScore, configuredMaxScore || policy.maxScore);
+  const score = clampScore(rawScore, policy.minScore, policy.maxScore);
   const positivePoints = breakdown
     .filter((item: any) => item.contribution > 0)
     .reduce((sum: number, item: any) => sum + item.contribution, 0);
@@ -1257,7 +1241,7 @@ export async function buildRentScoreSnapshot(publicAccountId: string, tx: DbClie
       score,
       rawScore,
       minScore: policy.minScore,
-      maxScore: configuredMaxScore || policy.maxScore,
+      maxScore: policy.maxScore,
       positivePoints,
       negativePoints,
       eventCount: events.length,
@@ -2087,3 +2071,4 @@ export async function getAuthenticatedRenterScore(publicAccountId: string) {
 }
 
 export type { RentScoreSnapshot, DefaultRuleDefinition };
+

@@ -7,6 +7,7 @@ import { createMailPreview } from "../mail-preview/mail-preview.service";
 import { renderInfoPanel, renderTransactionalEmail } from "../mail/mail-templates";
 import { sendTransactionalMail } from "../mail/mail.service";
 import { getAvailableRentScorePaymentProviders } from "../score-payments/score-payments.service";
+import { notifyUser } from "../notifications/notifications.service";
 
 function normalizeEmail(email: string) {
   return email.trim().toLowerCase();
@@ -25,17 +26,17 @@ async function createPublicAccountNotification(input: {
   ctaLabel?: string;
   ctaPath?: string;
   metadata?: Prisma.JsonObject;
+  sendEmail?: boolean;
 }) {
-  await prisma.publicAccountNotification.create({
-    data: {
-      publicAccountId: input.publicAccountId,
-      notificationType: input.notificationType as any,
-      title: input.title,
-      message: input.message,
-      ctaLabel: input.ctaLabel ?? null,
-      ctaPath: input.ctaPath ?? null,
-      metadata: input.metadata
-    }
+  await notifyUser({
+    recipientAccountId: input.publicAccountId,
+    event: input.notificationType,
+    title: input.title,
+    message: input.message,
+    actionLabel: input.ctaLabel,
+    actionUrl: input.ctaPath,
+    metadata: input.metadata,
+    sendEmail: input.sendEmail ?? false
   });
 }
 
@@ -975,7 +976,8 @@ export async function initiateRenterPaymentConfirmation(input: {
           paymentScheduleId: schedule.id,
           proposedRenterId: schedule.proposedRenterId,
           paymentType: schedule.paymentType
-        } as Prisma.JsonObject
+        } as Prisma.JsonObject,
+        sendEmail: true
       })
     )
   );
@@ -1090,7 +1092,8 @@ export async function createSelfInitiatedRenterPayment(input: {
           linkedCaseId: linkedCase.id,
           propertyId: linkedCase.propertyId,
           paymentType: input.paymentType
-        } as Prisma.JsonObject
+        } as Prisma.JsonObject,
+        sendEmail: true
       })
     )
   );
@@ -1633,3 +1636,4 @@ export async function searchRenterShareRecipients(input: {
     }))
   };
 }
+

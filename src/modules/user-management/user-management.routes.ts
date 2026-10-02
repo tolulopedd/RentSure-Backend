@@ -10,6 +10,8 @@ import {
   createAdmin,
   getManagedUser,
   listManagedUsers,
+  listCustomers,
+  exportCustomers,
   requireAdminPermission,
   resendManagedUserVerification,
   sendManagedUserPasswordReset,
@@ -21,6 +23,7 @@ const userTypeSchema = z.enum(["RENTER", "LANDLORD", "AGENT", "ADMIN"]);
 const statusSchema = z.enum(["UNVERIFIED", "ACTIVE", "DISABLED", "SUSPENDED", "BLOCKED"]);
 const verificationSchema = z.enum(["VERIFIED", "UNVERIFIED", "PENDING", "FAILED"]);
 const adminRoleSchema = z.enum(["SUPER_ADMIN", "ADMIN", "SUPPORT_ADMIN", "READ_ONLY_ADMIN"]);
+const customerTypeSchema = z.enum(["RENTER", "LANDLORD", "AGENT"]);
 
 function parseError(error: unknown, fallback: string) {
   return error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? fallback, 400, "VALIDATION_ERROR") : error;
@@ -42,6 +45,43 @@ router.get("/admin/users", requireAuth, async (req, res, next) => {
     res.json(await listManagedUsers(query));
   } catch (error) {
     next(parseError(error, "Invalid user search"));
+  }
+});
+
+router.get("/admin/customers", requireAuth, async (req, res, next) => {
+  try {
+    await requireAdminPermission(req.user!.userId, "VIEW");
+    const query = z.object({
+      q: z.string().trim().max(120).optional(),
+      customerType: customerTypeSchema.optional(),
+      status: statusSchema.extract(["UNVERIFIED", "ACTIVE", "DISABLED", "SUSPENDED", "BLOCKED"]).optional(),
+      sortBy: z.enum(["firstName", "lastName", "type", "email", "dateRegistered"]).optional(),
+      sortDir: z.enum(["asc", "desc"]).optional(),
+      page: z.coerce.number().int().min(1).optional(),
+      pageSize: z.coerce.number().int().min(1).max(100).optional()
+    }).parse(req.query);
+    res.json(await listCustomers(query));
+  } catch (error) {
+    next(parseError(error, "Invalid customer search"));
+  }
+});
+
+router.get("/admin/customers/export", requireAuth, async (req, res, next) => {
+  try {
+    await requireAdminPermission(req.user!.userId, "EXPORT");
+    const query = z.object({
+      q: z.string().trim().max(120).optional(),
+      customerType: customerTypeSchema.optional(),
+      status: statusSchema.extract(["UNVERIFIED", "ACTIVE", "DISABLED", "SUSPENDED", "BLOCKED"]).optional(),
+      sortBy: z.enum(["firstName", "lastName", "type", "email", "dateRegistered"]).optional(),
+      sortDir: z.enum(["asc", "desc"]).optional()
+    }).parse(req.query);
+    const csv = await exportCustomers(query);
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="rentsure-customers-${new Date().toISOString().slice(0, 10)}.csv"`);
+    res.send(`\ufeff${csv}`);
+  } catch (error) {
+    next(parseError(error, "Unable to export customers"));
   }
 });
 
@@ -164,3 +204,4 @@ router.post("/admin/admins", requireAuth, async (req, res, next) => {
 });
 
 export const userManagementRoutes = router;
+

@@ -18,6 +18,7 @@ import { attachPassportPhotoToPublicAccount, buildPublicDocumentViewUrl, toPubli
 import { renderTransactionalEmail } from "../mail/mail-templates";
 import { sendTransactionalMail } from "../mail/mail.service";
 import { getAvailableRentScorePaymentProviders } from "../score-payments/score-payments.service";
+import { notifyUser } from "../notifications/notifications.service";
 
 type DbClient = Prisma.TransactionClient | typeof prisma;
 type ProposedRenterDecision = "APPROVED" | "HOLD" | "DECLINED";
@@ -697,19 +698,19 @@ async function createPublicAccountNotification(input: {
   ctaLabel?: string;
   ctaPath?: string;
   metadata?: Prisma.JsonObject;
+  sendEmail?: boolean;
   tx?: DbClient;
 }) {
-  const client = input.tx ?? prisma;
-  await client.publicAccountNotification.create({
-    data: {
-      publicAccountId: input.publicAccountId,
-      notificationType: input.notificationType as any,
-      title: input.title,
-      message: input.message,
-      ctaLabel: input.ctaLabel ?? null,
-      ctaPath: input.ctaPath ?? null,
-      metadata: input.metadata
-    }
+  await notifyUser({
+    recipientAccountId: input.publicAccountId,
+    event: input.notificationType,
+    title: input.title,
+    message: input.message,
+    actionLabel: input.ctaLabel,
+    actionUrl: input.ctaPath,
+    metadata: input.metadata,
+    sendEmail: input.sendEmail ?? false,
+    db: input.tx
   });
 }
 
@@ -744,6 +745,7 @@ async function notifyRenterOfPaymentReview(input: {
       propertyUnitLabel: input.propertyUnitLabel ?? null,
       outcome: input.outcome
     } as Prisma.JsonObject,
+    sendEmail: true,
     tx: input.tx
   });
 }
@@ -851,7 +853,7 @@ async function notifyProposedRenter(input: {
 }
 
 function canUseExistingRenterAccount(account?: PublicAccount | null) {
-  return Boolean(account && account.accountType === "RENTER" && account.status === "ACTIVE");
+  return Boolean(account && account.accountType === "RENTER" && account.status !== "DISABLED");
 }
 
 export async function getWorkspaceOverview(publicAccountId: string) {
@@ -2839,6 +2841,25 @@ export async function decideWorkspaceProposedRenter(input: {
       );
     }
 
+    if (proposedRenter.renterAccountId && input.decision !== "HOLD") {
+      await notifyUser({
+        recipientAccountId: proposedRenter.renterAccountId,
+        event: input.decision === "APPROVED" ? "APPLICATION_APPROVED" : "APPLICATION_REJECTED",
+        title: input.decision === "APPROVED" ? "Rental application approved" : "Rental application declined",
+        message:
+          input.decision === "APPROVED"
+            ? `Your application for ${propertyAddress} was approved by the landlord.`
+            : `Your application for ${propertyAddress} was declined by the landlord.`,
+        actionLabel: "Open landlord decision",
+        actionUrl: "/account/renter/cases",
+        relatedEntityType: "PROPOSED_RENTER",
+        relatedEntityId: proposedRenter.id,
+        metadata: { decision: input.decision, propertyAddress } as Prisma.JsonObject,
+        sendEmail: false,
+        db: tx
+      });
+    }
+
     return { proposedRenterId: proposedRenter.id };
   });
 
@@ -3443,3 +3464,4 @@ export async function commentOnWorkspaceProposedRenter(input: {
 
   return getWorkspaceQueueItem(input.publicAccountId, result.proposedRenterId);
 }
+

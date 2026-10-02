@@ -7,11 +7,12 @@ import { requestPasswordReset, resendPublicAccountVerification } from "../auth/a
 export type UserManagementType = "RENTER" | "LANDLORD" | "AGENT" | "ADMIN";
 export type UserManagementStatus = PublicAccountStatus | UserStatus;
 export type VerificationStatus = "VERIFIED" | "UNVERIFIED" | "PENDING" | "FAILED";
-export type AdminPermission = "VIEW" | "EDIT" | "STATUS" | "ROLE" | "ADMIN_MANAGE";
+export type AdminPermission = "VIEW" | "EDIT" | "STATUS" | "ROLE" | "ADMIN_MANAGE" | "EXPORT";
+export type CustomerType = "RENTER" | "LANDLORD" | "AGENT";
 
 const adminRolePermissions: Record<AdminRole, AdminPermission[]> = {
-  SUPER_ADMIN: ["VIEW", "EDIT", "STATUS", "ROLE", "ADMIN_MANAGE"],
-  ADMIN: ["VIEW", "EDIT", "STATUS", "ROLE"],
+  SUPER_ADMIN: ["VIEW", "EDIT", "STATUS", "ROLE", "ADMIN_MANAGE", "EXPORT"],
+  ADMIN: ["VIEW", "EDIT", "STATUS", "ROLE", "EXPORT"],
   SUPPORT_ADMIN: ["VIEW", "EDIT", "STATUS"],
   READ_ONLY_ADMIN: ["VIEW"]
 };
@@ -114,6 +115,90 @@ export async function listManagedUsers(input: {
   return { items: items.slice((page - 1) * pageSize, page * pageSize), pagination: { page, pageSize, total, totalPages: Math.max(Math.ceil(total / pageSize), 1) }, counts };
 }
 
+export type CustomerQuery = {
+  q?: string;
+  customerType?: CustomerType;
+  status?: PublicAccountStatus;
+  sortBy?: "firstName" | "lastName" | "type" | "email" | "dateRegistered";
+  sortDir?: "asc" | "desc";
+  page?: number;
+  pageSize?: number;
+};
+
+export type CustomerRecord = {
+  id: string;
+  firstName: string;
+  lastName: string;
+  customerType: CustomerType;
+  email: string;
+  phone: string;
+  address: string;
+  accountStatus: PublicAccountStatus;
+  dateRegistered: Date;
+};
+
+async function findCustomers(input: CustomerQuery) {
+  const query = input.q?.trim().toLowerCase();
+  const accounts = await prisma.publicAccount.findMany({
+    where: {
+      ...(input.customerType ? { accountType: input.customerType } : { accountType: { in: ["RENTER", "LANDLORD", "AGENT"] } }),
+      ...(input.status ? { status: input.status } : {}),
+      ...(query ? { OR: [
+        { id: { contains: query, mode: "insensitive" } },
+        { firstName: { contains: query, mode: "insensitive" } },
+        { lastName: { contains: query, mode: "insensitive" } },
+        { email: { contains: query, mode: "insensitive" } },
+        { phone: { contains: query, mode: "insensitive" } },
+        { organizationName: { contains: query, mode: "insensitive" } }
+      ] } : {})
+    },
+    select: { id: true, firstName: true, lastName: true, accountType: true, email: true, phone: true, address: true, status: true, createdAt: true }
+  });
+
+  const items: CustomerRecord[] = accounts.map((account) => ({
+    id: account.id,
+    firstName: account.firstName,
+    lastName: account.lastName,
+    customerType: account.accountType as CustomerType,
+    email: account.email,
+    phone: account.phone,
+    address: account.address,
+    accountStatus: account.status,
+    dateRegistered: account.createdAt
+  }));
+  const sortBy = input.sortBy ?? "dateRegistered";
+  const direction = input.sortDir === "asc" ? 1 : -1;
+  items.sort((left, right) => {
+    const leftValue = sortBy === "firstName" ? left.firstName : sortBy === "lastName" ? left.lastName : sortBy === "type" ? left.customerType : sortBy === "email" ? left.email : left.dateRegistered.getTime();
+    const rightValue = sortBy === "firstName" ? right.firstName : sortBy === "lastName" ? right.lastName : sortBy === "type" ? right.customerType : sortBy === "email" ? right.email : right.dateRegistered.getTime();
+    return String(leftValue).localeCompare(String(rightValue), undefined, { numeric: true }) * direction;
+  });
+  return items;
+}
+
+export async function listCustomers(input: CustomerQuery) {
+  const items = await findCustomers(input);
+  const pageSize = Math.min(Math.max(input.pageSize ?? 25, 1), 100);
+  const page = Math.max(input.page ?? 1, 1);
+  return {
+    items: items.slice((page - 1) * pageSize, page * pageSize),
+    pagination: { page, pageSize, total: items.length, totalPages: Math.max(Math.ceil(items.length / pageSize), 1) },
+    totalCustomers: items.length
+  };
+}
+
+function csvCell(value: string | number | Date | null | undefined) {
+  const text = value instanceof Date ? value.toISOString() : String(value ?? "");
+  return `"${text.replaceAll('"', '""')}"`;
+}
+
+export async function exportCustomers(input: CustomerQuery) {
+  const items = await findCustomers(input);
+  const header = ["First Name", "Last Name", "Customer Type", "Email Address", "Phone Number", "Address", "Account Status", "Date Registered"];
+  const rows = items.map((item) => [item.firstName, item.lastName, item.customerType, item.email, item.phone, item.address, item.accountStatus, item.dateRegistered].map(csvCell).join(","));
+  return [header.map(csvCell).join(","), ...rows].join("\n");
+}
+
 export async function getManagedUser(id: string) {
   const staff = await prisma.user.findUnique({ where: { id }, include: { adminNotes: { include: { author: { select: { fullName: true } } }, orderBy: { createdAt: "desc" } }, auditLogs: { orderBy: { createdAt: "desc" }, take: 50 } } });
   if (staff?.role === "ADMIN") {
@@ -180,3 +265,4 @@ export async function sendManagedUserPasswordReset(id: string) {
   if (!account) throw new AppError("User not found", 404, "USER_NOT_FOUND");
   return requestPasswordReset(account.email);
 }
+

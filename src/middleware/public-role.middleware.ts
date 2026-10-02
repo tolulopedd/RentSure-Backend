@@ -23,7 +23,7 @@ export function requirePublicRole(...roles: PublicAccountType[]) {
         }
       });
 
-      if (!account || account.status !== "ACTIVE") {
+      if (!account || account.status === "DISABLED") {
         return next(new AppError("Public account not found", 401, "UNAUTHORIZED"));
       }
 
@@ -42,3 +42,4 @@ export function requirePublicRole(...roles: PublicAccountType[]) {
     }
   };
 }
+

@@ -10,7 +10,8 @@ type MailCategory =
   | "RENTER_DECISION"
   | "RENTER_NOTIFICATION"
   | "RENTER_SHARE_REPORT"
-  | "PASSWORD_RESET";
+  | "PASSWORD_RESET"
+  | "NOTIFICATION";
 
 function hasResendConfig() {
   return Boolean(env.RESEND_API_KEY && env.RESEND_FROM_EMAIL);
@@ -135,3 +136,4 @@ export async function sendTransactionalMail(input: {
     previewUrl: process.env.NODE_ENV === "production" ? null : preview.previewUrl
   };
 }
+

@@ -9,7 +9,8 @@ type MailPreviewCategory =
   | "RENTER_DECISION"
   | "RENTER_NOTIFICATION"
   | "RENTER_SHARE_REPORT"
-  | "PASSWORD_RESET";
+  | "PASSWORD_RESET"
+  | "NOTIFICATION";
 
 type MailPreviewRecord = {
   id: string;
@@ -52,6 +53,7 @@ function categoryLabel(category: MailPreviewCategory) {
   if (category === "RENTER_DECISION") return "Renter Decision";
   if (category === "RENTER_NOTIFICATION") return "Renter Notification";
   if (category === "RENTER_SHARE_REPORT") return "Rent Score Share";
+  if (category === "NOTIFICATION") return "Notification";
   return "Password Reset";
 }
 
@@ -226,3 +228,4 @@ export function renderMailPreviewDocument(record: MailPreviewRecord) {
   </body>
 </html>`;
 }
+
