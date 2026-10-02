@@ -17,6 +17,15 @@ enum UserRole {
 enum UserStatus {
   ACTIVE
   DISABLED
+  SUSPENDED
+  BLOCKED
+}
+
+enum AdminRole {
+  SUPER_ADMIN
+  ADMIN
+  SUPPORT_ADMIN
+  READ_ONLY_ADMIN
 }
 
 enum PublicAccountType {
@@ -39,6 +48,8 @@ enum PublicAccountStatus {
   UNVERIFIED
   ACTIVE
   DISABLED
+  SUSPENDED
+  BLOCKED
 }
 
 enum IdentityReviewStatus {
@@ -180,10 +191,12 @@ model User {
   email           String           @unique
   passwordHash    String
   role            UserRole
+  adminRole       AdminRole?
   status          UserStatus       @default(ACTIVE)
   locationLabel   String?
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @updatedAt
+  lastLoginAt     DateTime?
 
   refreshTokens   RefreshToken[]
   passwordResetTokens PasswordResetToken[]
@@ -193,6 +206,8 @@ model User {
   rentScoreEvents RentScoreEvent[]
   createdRentScoreOverrides RentScoreOverride[] @relation("RentScoreOverrideCreatedBy")
   reviewedIdentityAccounts PublicAccount[] @relation("PublicAccountIdentityReviewedBy")
+  adminNotes       AdminNote[] @relation("AdminNoteAuthor")
+  managedNotes     AdminNote[]
 
   @@index([role])
   @@index([status])
@@ -237,6 +252,7 @@ model PublicAccount {
   status             PublicAccountStatus   @default(UNVERIFIED)
   createdAt          DateTime              @default(now())
   updatedAt          DateTime              @updatedAt
+  lastLoginAt        DateTime?
 
   verificationTokens EmailVerificationToken[]
   refreshTokens      PublicRefreshToken[]
@@ -265,6 +281,7 @@ model PublicAccount {
   rentScoreOverrides RentScoreOverride[]
   passportPhotoDocument PublicAccountDocument? @relation("PublicAccountPassportPhoto", fields: [passportPhotoDocumentId], references: [id], onDelete: SetNull)
   identityReviewedBy User? @relation("PublicAccountIdentityReviewedBy", fields: [identityReviewedByUserId], references: [id], onDelete: SetNull)
+  adminNotes         AdminNote[] @relation("AdminNotePublicAccount")
 
   @@index([accountType])
   @@index([entityType])
@@ -272,6 +289,24 @@ model PublicAccount {
   @@index([passportPhotoDocumentId])
   @@index([identityReviewStatus])
   @@index([identityReviewedByUserId])
+}
+
+model AdminNote {
+  id              String         @id @default(uuid())
+  publicAccountId String?
+  userId          String?
+  authorUserId    String
+  note            String
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  publicAccount   PublicAccount? @relation("AdminNotePublicAccount", fields: [publicAccountId], references: [id], onDelete: Cascade)
+  user            User?          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  author          User           @relation("AdminNoteAuthor", fields: [authorUserId], references: [id], onDelete: Restrict)
+
+  @@index([publicAccountId, createdAt])
+  @@index([userId, createdAt])
+  @@index([authorUserId, createdAt])
 }
 
 model PublicAccountDocument {

@@ -14,6 +14,7 @@ import { workspaceRoutes } from "./modules/workspace/workspace.routes";
 import { renterRoutes } from "./modules/renter/renter.routes";
 import { storageRoutes } from "./modules/storage/storage.routes";
 import { mailPreviewRoutes } from "./modules/mail-preview/mail-preview.routes";
+import { userManagementRoutes } from "./modules/user-management/user-management.routes";
 import { env } from "./config/env";
 
 function allowedCorsOrigins() {
@@ -62,6 +63,7 @@ export function createApp() {
   app.use("/api", workspaceRoutes);
   app.use("/api", renterRoutes);
   app.use("/api", storageRoutes);
+  app.use("/api", userManagementRoutes);
   if (process.env.NODE_ENV !== "production") {
     app.use("/api", mailPreviewRoutes);
   }

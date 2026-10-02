@@ -851,7 +851,7 @@ async function notifyProposedRenter(input: {
 }
 
 function canUseExistingRenterAccount(account?: PublicAccount | null) {
-  return Boolean(account && account.accountType === "RENTER" && account.status !== "DISABLED");
+  return Boolean(account && account.accountType === "RENTER" && account.status === "ACTIVE");
 }
 
 export async function getWorkspaceOverview(publicAccountId: string) {

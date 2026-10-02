@@ -260,6 +260,7 @@ async function createStaffSession(user: User) {
       fullName: user.fullName,
       email: user.email,
       role: user.role,
+      adminRole: user.adminRole ?? "ADMIN",
       outletId: null,
       outletName: null
     }
@@ -339,7 +340,7 @@ async function authenticateStaffUser(email: string, password: string) {
     where: { email }
   });
 
-  if (!user || user.status === "DISABLED") return null;
+  if (!user || user.status !== "ACTIVE") return null;
 
   const ok = await bcrypt.compare(password, user.passwordHash);
   if (!ok) return null;
@@ -352,7 +353,7 @@ async function authenticatePublicAccount(email: string, password: string) {
     where: { email }
   });
 
-  if (!account || account.status === "DISABLED") return null;
+  if (!account || account.status === "DISABLED" || account.status === "SUSPENDED" || account.status === "BLOCKED") return null;
 
   const ok = await bcrypt.compare(password, account.passwordHash);
   if (!ok) return null;
@@ -696,6 +697,7 @@ export async function loginWithPassword(emailInput: string, password: string) {
 
   const staffUser = await authenticateStaffUser(email, password);
   if (staffUser) {
+    await prisma.user.update({ where: { id: staffUser.id }, data: { lastLoginAt: new Date() } });
     return createStaffSession(staffUser);
   }
 
@@ -707,6 +709,8 @@ export async function loginWithPassword(emailInput: string, password: string) {
   if (!publicAccount.emailVerifiedAt || publicAccount.status === "UNVERIFIED") {
     throw new AppError("Verify your email before signing in", 403, "EMAIL_NOT_VERIFIED");
   }
+
+  await prisma.publicAccount.update({ where: { id: publicAccount.id }, data: { lastLoginAt: new Date() } });
 
   return createPublicSession(publicAccount);
 }
@@ -730,7 +734,7 @@ export async function rotateRefreshToken(rawRefreshToken: string) {
       where: { id: payload.userId }
     });
 
-    if (!account || account.status === "DISABLED" || !account.emailVerifiedAt) {
+    if (!account || account.status !== "ACTIVE" || !account.emailVerifiedAt) {
       throw new AppError("Account unavailable", 401, "INVALID_REFRESH_TOKEN");
     }
 
@@ -749,7 +753,7 @@ export async function rotateRefreshToken(rawRefreshToken: string) {
     where: { id: payload.userId }
   });
 
-  if (!user || user.status === "DISABLED") {
+  if (!user || user.status !== "ACTIVE") {
     throw new AppError("User unavailable", 401, "INVALID_REFRESH_TOKEN");
   }
 
@@ -796,7 +800,7 @@ export async function getStaffProfile(userId: string) {
     where: { id: userId }
   });
 
-  if (!user || user.status === "DISABLED") {
+  if (!user || user.status !== "ACTIVE") {
     throw new AppError("User unavailable", 404, "USER_NOT_FOUND");
   }
 
@@ -822,7 +826,7 @@ export async function updateStaffProfile(input: {
     where: { id: input.userId }
   });
 
-  if (!user || user.status === "DISABLED") {
+  if (!user || user.status !== "ACTIVE") {
     throw new AppError("User unavailable", 404, "USER_NOT_FOUND");
   }
 
@@ -865,7 +869,7 @@ export async function changeStaffPassword(input: {
     where: { id: input.userId }
   });
 
-  if (!user || user.status === "DISABLED") {
+  if (!user || user.status !== "ACTIVE") {
     throw new AppError("User unavailable", 404, "USER_NOT_FOUND");
   }
 
