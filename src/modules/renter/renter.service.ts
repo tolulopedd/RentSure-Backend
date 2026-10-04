@@ -8,6 +8,7 @@ import { renderInfoPanel, renderTransactionalEmail } from "../mail/mail-template
 import { sendTransactionalMail } from "../mail/mail.service";
 import { getAvailableRentScorePaymentProviders } from "../score-payments/score-payments.service";
 import { notifyUser } from "../notifications/notifications.service";
+import { env } from "../../config/env";
 
 function normalizeEmail(email: string) {
   return email.trim().toLowerCase();
@@ -348,7 +349,7 @@ async function notifyLinkedPropertyStakeholders(input: {
             input.responseNote?.trim() ? `Renter note: ${input.responseNote.trim()}` : "Open RentSure to review the linked tenant record."
           ],
           ctaLabel: "Open linked tenant",
-          ctaUrl: "/account/queue"
+          ctaUrl: `${env.APP_WEB_BASE_URL.replace(/\/+$/, "")}/account/queue`
         })
       });
     })
@@ -1636,4 +1637,3 @@ export async function searchRenterShareRecipients(input: {
     }))
   };
 }
-
