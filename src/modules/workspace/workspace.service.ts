@@ -1981,6 +1981,7 @@ export async function getWorkspaceQueueItem(publicAccountId: string, proposedRen
     firstName: item.firstName,
     lastName: item.lastName,
     organizationName: item.organizationName,
+    renterAccountId: item.renterAccountId,
     email: item.email,
     phone: item.phone,
     address: item.address,
@@ -2539,6 +2540,84 @@ export async function createWorkspaceProposedRenter(input: {
     ...detail,
     invitePreviewUrl: result.invitePreviewUrl
   };
+}
+
+export async function correctWorkspaceProposedRenterEmail(input: {
+  publicAccountId: string;
+  proposedRenterId: string;
+  email: string;
+}) {
+  const email = normalizeEmail(input.email);
+
+  const result = await prisma.$transaction(async (tx) => {
+    const account = await getWorkspaceAccount(input.publicAccountId, tx);
+    if (account.accountType !== "LANDLORD") {
+      throw new AppError("Only landlords can correct a renter invite email", 403, "FORBIDDEN");
+    }
+
+    const proposedRenter = await getAccessibleProposedRenter(input.publicAccountId, input.proposedRenterId, tx);
+    if (proposedRenter.renterAccountId || proposedRenter.decision || proposedRenter.renterLinkResponseStatus !== "PENDING") {
+      throw new AppError("Only pending invites for unregistered renters can be corrected", 409, "INVITE_EMAIL_LOCKED");
+    }
+
+    const existingAccount = await tx.publicAccount.findUnique({ where: { email } });
+    if (existingAccount) {
+      throw new AppError("This email already belongs to a RentSure account. Search and link that renter instead.", 409, "EMAIL_ALREADY_REGISTERED");
+    }
+
+    const supportsPropertyUnitColumn = await supportsProposedRenterPropertyUnitColumn();
+    const duplicateWhere = supportsPropertyUnitColumn
+      ? {
+          id: { not: proposedRenter.id },
+          propertyUnitId: proposedRenter.propertyUnitId,
+          email,
+          decision: null
+        }
+      : {
+          id: { not: proposedRenter.id },
+          propertyId: proposedRenter.propertyId,
+          email,
+          decision: null
+        };
+    const duplicate = await tx.proposedRenter.findFirst({ where: duplicateWhere as any, select: { id: true } });
+    if (duplicate) {
+      throw new AppError("This email already has a pending link for the selected property unit", 409, "RENTER_ALREADY_QUEUED");
+    }
+
+    await tx.proposedRenter.update({
+      where: { id: proposedRenter.id },
+      data: { email }
+    });
+
+    const inviteState = await notifyProposedRenter({
+      requestedByAccountId: input.publicAccountId,
+      requestedByName: publicAccountDisplayName(account),
+      requestedByAccountType: "LANDLORD",
+      propertySummaryLabel: [propertySummary(proposedRenter.property), propertyUnitSummary(proposedRenter.propertyUnit)].filter(Boolean).join(" · "),
+      propertyAddress: [proposedRenter.property.address, proposedRenter.property.city, proposedRenter.property.state].filter(Boolean).join(", "),
+      renterEmail: email,
+      renterName: proposedRenter.organizationName || `${proposedRenter.firstName} ${proposedRenter.lastName}`.trim(),
+      existingAccountId: null,
+      tx
+    });
+
+    await logProposedRenterActivity({
+      proposedRenterId: proposedRenter.id,
+      actorAccountId: input.publicAccountId,
+      activityType: "COMMENT",
+      message: `Pending renter invite email corrected to ${email}.`,
+      metadata: inviteState.invitePreviewUrl ? ({ invitePreviewUrl: inviteState.invitePreviewUrl } as Prisma.JsonObject) : undefined,
+      tx
+    });
+
+    return {
+      proposedRenterId: proposedRenter.id,
+      invitePreviewUrl: inviteState.invitePreviewUrl
+    };
+  });
+
+  const detail = await getWorkspaceQueueItem(input.publicAccountId, result.proposedRenterId);
+  return { ...detail, invitePreviewUrl: result.invitePreviewUrl };
 }
 
 export async function listPendingRenterInvites() {
@@ -3464,4 +3543,3 @@ export async function commentOnWorkspaceProposedRenter(input: {
 
   return getWorkspaceQueueItem(input.publicAccountId, result.proposedRenterId);
 }
-

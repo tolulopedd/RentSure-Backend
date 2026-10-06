@@ -9,6 +9,7 @@ import {
   createWorkspacePaymentSchedule,
   createWorkspaceProperty,
   createWorkspaceProposedRenter,
+  correctWorkspaceProposedRenterEmail,
   decideWorkspaceProposedRenter,
   forwardWorkspaceScoreRequest,
   getWorkspaceProfile,
@@ -104,6 +105,10 @@ const proposedRenterSchema = z.object({
   state: z.string().trim().max(120).optional(),
   city: z.string().trim().max(120).optional(),
   notes: z.string().trim().max(500).optional()
+});
+
+const correctProposedRenterEmailSchema = z.object({
+  email: z.string().trim().email()
 });
 
 const rentScoreRequestSchema = z.object({
@@ -380,6 +385,21 @@ router.post("/workspace/queue", async (req, res, next) => {
     res.status(201).json(result);
   } catch (error) {
     next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid proposed renter payload", 400, "VALIDATION_ERROR") : error);
+  }
+});
+
+router.patch("/workspace/queue/:proposedRenterId/invite-email", async (req, res, next) => {
+  try {
+    const params = z.object({ proposedRenterId: z.string().uuid() }).parse(req.params);
+    const body = correctProposedRenterEmailSchema.parse(req.body);
+    const result = await correctWorkspaceProposedRenterEmail({
+      publicAccountId: req.user!.userId,
+      proposedRenterId: params.proposedRenterId,
+      email: body.email
+    });
+    res.json(result);
+  } catch (error) {
+    next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message ?? "Invalid invite email", 400, "VALIDATION_ERROR") : error);
   }
 });
 

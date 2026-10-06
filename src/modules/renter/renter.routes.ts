@@ -24,19 +24,35 @@ const nigeriaPhoneSchema = z.string().trim().regex(/^(?:0\d{10}|\+234\d{10})$/, 
 
 router.use("/renter", requireAuth, requirePublicRole("RENTER"));
 
+const optionalProfileText = (min: number, max?: number) =>
+  z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    max == null
+      ? z.string().trim().min(min).optional()
+      : z.string().trim().min(min).max(max).optional()
+  );
+
+const optionalNullableProfileText = (max?: number) =>
+  z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    max == null
+      ? z.string().trim().optional().nullable()
+      : z.string().trim().max(max).optional().nullable()
+  );
+
 const updateProfileSchema = z.object({
-  firstName: z.string().trim().min(1).optional(),
-  lastName: z.string().trim().min(1).optional(),
-  organizationName: z.string().trim().optional().nullable(),
-  registrationNumber: z.string().trim().max(120).optional().nullable(),
+  firstName: optionalProfileText(1),
+  lastName: optionalProfileText(1),
+  organizationName: optionalNullableProfileText(),
+  registrationNumber: optionalNullableProfileText(120),
   phone: nigeriaPhoneSchema.optional(),
-  state: z.string().trim().min(2).optional(),
-  city: z.string().trim().min(2).optional(),
-  address: z.string().trim().min(5).optional(),
+  state: optionalProfileText(2),
+  city: optionalProfileText(2),
+  address: optionalProfileText(5),
   residenceMoveCount5y: z.number().int().min(1).max(5).optional().nullable(),
   employmentType: z.enum(["EMPLOYED", "SELF_EMPLOYED"]).optional().nullable(),
   employmentYears: z.number().int().min(1).max(60).optional().nullable(),
-  notes: z.string().trim().max(500).optional().nullable()
+  notes: optionalNullableProfileText(500)
 });
 
 const identitySchema = z.object({
