@@ -160,6 +160,7 @@ const confirmWorkspacePaymentSchema = z.object({
 
 const decisionSchema = z.object({
   decision: z.enum(["APPROVED", "HOLD", "DECLINED"]),
+  requestedInformation: z.array(z.enum(["Work History", "Work Reference Letter"])).max(2).optional(),
   note: z.string().trim().max(500).optional()
 });
 
@@ -456,6 +457,7 @@ router.post("/workspace/queue/:proposedRenterId/decision", async (req, res, next
       publicAccountId: req.user!.userId,
       proposedRenterId: params.proposedRenterId,
       decision: body.decision,
+      requestedInformation: body.requestedInformation,
       note: body.note
     });
     res.json(result);

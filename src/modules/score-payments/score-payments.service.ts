@@ -1,3 +1,4 @@
+import { recordNotifiableActivity, notifyScorePayment } from "../notifications/stakeholder-events.service";
 import type { Prisma, RentScorePaymentProvider, RentScorePaymentStatus } from "@prisma/client";
 import { prisma } from "../../prisma/client";
 import { AppError } from "../../common/errors/AppError";
@@ -177,7 +178,7 @@ async function createPaidScoreRequest(tx: DbClient, payment: {
     }
   });
 
-  await tx.proposedRenterActivity.create({
+  await recordNotifiableActivity(tx, {
     data: {
       proposedRenterId: payment.proposedRenterId,
       actorAccountId: payment.requestedByAccountId,
@@ -201,6 +202,7 @@ async function createPaidScoreRequest(tx: DbClient, payment: {
       verifiedAt: new Date()
     }
   });
+    await notifyScorePayment(payment.id, tx);
 
   return scoreRequest;
 }
@@ -430,6 +432,7 @@ export async function createRentScorePaymentSession(input: {
         status: input.provider === "MANUAL_TRANSFER" ? "AWAITING_MANUAL_CONFIRMATION" : "PENDING_ACTION"
       }
     });
+    await notifyScorePayment(payment.id, tx);
 
     if (input.provider === "MANUAL_TRANSFER") {
       const instructions = getManualTransferInstructions(reference);
@@ -440,6 +443,7 @@ export async function createRentScorePaymentSession(input: {
           metadata: instructions as Prisma.JsonObject
         }
       });
+    await notifyScorePayment(payment.id, tx);
 
       return {
         paymentId: payment.id,
@@ -484,6 +488,7 @@ export async function createRentScorePaymentSession(input: {
         gatewayReference: initialized.gatewayReference
       }
     });
+    await notifyScorePayment(payment.id, tx);
 
     return {
       paymentId: payment.id,
@@ -538,6 +543,7 @@ export async function createRenterRentScorePaymentSession(input: {
         } as Prisma.JsonObject
       }
     });
+    await notifyScorePayment(payment.id, tx);
 
     if (input.provider === "MANUAL_TRANSFER") {
       const instructions = getManualTransferInstructions(reference);
@@ -551,6 +557,7 @@ export async function createRenterRentScorePaymentSession(input: {
           } as Prisma.JsonObject
         }
       });
+    await notifyScorePayment(payment.id, tx);
 
       return {
         paymentId: payment.id,
@@ -593,6 +600,7 @@ export async function createRenterRentScorePaymentSession(input: {
         gatewayReference: initialized.gatewayReference
       }
     });
+    await notifyScorePayment(payment.id, tx);
 
     return {
       paymentId: payment.id,
@@ -657,6 +665,7 @@ export async function verifyRentScorePayment(input: {
         metadata: verification.rawPayload as Prisma.JsonObject
       }
     });
+    await notifyScorePayment(payment.id, prisma);
     throw new AppError("Payment was not completed successfully", 400, "PAYMENT_NOT_COMPLETED");
   }
 
@@ -676,6 +685,7 @@ export async function verifyRentScorePayment(input: {
           metadata: verification.rawPayload as Prisma.JsonObject
         }
       });
+    await notifyScorePayment(payment.id, tx);
 
       await createPaidScoreRequest(tx, {
         id: payment.id,
@@ -727,6 +737,7 @@ export async function verifyRenterRentScorePayment(input: {
         metadata: verification.rawPayload as Prisma.JsonObject
       }
     });
+    await notifyScorePayment(payment.id, prisma);
     throw new AppError("Payment was not completed successfully", 400, "PAYMENT_NOT_COMPLETED");
   }
 
@@ -740,6 +751,7 @@ export async function verifyRenterRentScorePayment(input: {
       metadata: verification.rawPayload as Prisma.JsonObject
     }
   });
+    await notifyScorePayment(payment.id, prisma);
 
   return { success: true };
 }
@@ -824,6 +836,7 @@ export async function confirmManualRentScorePayment(input: {
         confirmedByUserId: input.adminUserId
       }
     });
+    await notifyScorePayment(payment.id, tx);
 
     if (payment.proposedRenterId) {
       await createPaidScoreRequest(tx, {
@@ -929,6 +942,7 @@ export async function approveRentScoreReport(input: {
         reportApprovedByUserId: input.adminUserId
       }
     });
+    await notifyScorePayment(payment.id, tx);
 
     if (payment.proposedRenterId && payment.scoreRequestId) {
       await tx.scoreRequest.update({
@@ -947,7 +961,7 @@ export async function approveRentScoreReport(input: {
         select: { id: true }
       });
 
-      await tx.proposedRenterActivity.create({
+      await recordNotifiableActivity(tx, {
         data: {
           proposedRenterId: payment.proposedRenterId,
           actorAccountId: null,

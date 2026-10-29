@@ -1,3 +1,4 @@
+import { notifyUser } from "../notifications/notifications.service";
 import bcrypt from "bcryptjs";
 import type { AdminRole, Prisma, PublicAccountStatus, UserStatus } from "@prisma/client";
 import { prisma } from "../../prisma/client";
@@ -219,30 +220,50 @@ export async function getManagedUser(id: string) {
 
 export async function updateManagedUser(id: string, input: { fullName?: string; firstName?: string; lastName?: string; organizationName?: string | null; phone?: string; address?: string; city?: string; state?: string; notes?: string | null }) {
   const staff = await prisma.user.findUnique({ where: { id } });
-  if (staff?.role === "ADMIN") return prisma.user.update({ where: { id }, data: { fullName: input.fullName?.trim() || undefined }, select: { id: true, fullName: true, email: true, role: true, status: true, adminRole: true } });
+  if (staff?.role === "ADMIN") {
+    const result = await prisma.user.update({ where: { id }, data: { fullName: input.fullName?.trim() || undefined }, select: { id: true, fullName: true, email: true, role: true, status: true, adminRole: true } });
+    await notifyUser({ recipientStaffId: id, event: "STAKEHOLDER_UPDATE", title: "Profile updated by admin", message: `An administrator updated your RentSure profile. Open your profile to review the changes.`, actionUrl: "/app/profile" });
+    return result;
+  }
   const account = await prisma.publicAccount.findUnique({ where: { id } });
   if (!account) throw new AppError("User not found", 404, "USER_NOT_FOUND");
-  return prisma.publicAccount.update({ where: { id }, data: { firstName: input.firstName?.trim() || undefined, lastName: input.lastName?.trim() || undefined, organizationName: input.organizationName === undefined ? undefined : input.organizationName?.trim() || null, phone: input.phone?.trim() || undefined, address: input.address?.trim() || undefined, city: input.city?.trim() || undefined, state: input.state?.trim() || undefined, notes: input.notes === undefined ? undefined : input.notes?.trim() || null }, select: { id: true, firstName: true, lastName: true, organizationName: true, email: true, status: true, accountType: true } });
+  const result = await prisma.publicAccount.update({ where: { id }, data: { firstName: input.firstName?.trim() || undefined, lastName: input.lastName?.trim() || undefined, organizationName: input.organizationName === undefined ? undefined : input.organizationName?.trim() || null, phone: input.phone?.trim() || undefined, address: input.address?.trim() || undefined, city: input.city?.trim() || undefined, state: input.state?.trim() || undefined, notes: input.notes === undefined ? undefined : input.notes?.trim() || null }, select: { id: true, firstName: true, lastName: true, organizationName: true, email: true, status: true, accountType: true } });
+  await notifyUser({ recipientAccountId: id, event: "STAKEHOLDER_UPDATE", title: "Profile updated by admin", message: `An administrator updated your RentSure profile. Open your profile to review the changes.`,
+    actionUrl: account.accountType === "RENTER" ? "/account/renter/profile" : "/account/profile" });
+  return result;
 }
 
 export async function changeManagedUserStatus(id: string, action: "ACTIVATE" | "DEACTIVATE" | "SUSPEND" | "UNSUSPEND" | "BLOCK") {
   const staff = await prisma.user.findUnique({ where: { id } });
   const nextStatus = action === "ACTIVATE" || action === "UNSUSPEND" ? "ACTIVE" : action === "DEACTIVATE" ? "DISABLED" : action === "SUSPEND" ? "SUSPENDED" : "BLOCKED";
-  if (staff?.role === "ADMIN") return prisma.user.update({ where: { id }, data: { status: nextStatus as UserStatus }, select: { id: true, status: true, adminRole: true } });
+  if (staff?.role === "ADMIN") {
+    const result = await prisma.user.update({ where: { id }, data: { status: nextStatus as UserStatus }, select: { id: true, status: true, adminRole: true } });
+    await notifyUser({ recipientStaffId: id, event: "STAKEHOLDER_UPDATE", title: "Account status updated", message: `Your RentSure account status is now ${nextStatus.toLowerCase()}. Open your profile for details.`, actionUrl: "/app/profile" });
+    return result;
+  }
   const account = await prisma.publicAccount.findUnique({ where: { id } });
   if (!account) throw new AppError("User not found", 404, "USER_NOT_FOUND");
-  return prisma.publicAccount.update({ where: { id }, data: { status: nextStatus as PublicAccountStatus }, select: { id: true, status: true, accountType: true } });
+  const result = await prisma.publicAccount.update({ where: { id }, data: { status: nextStatus as PublicAccountStatus }, select: { id: true, status: true, accountType: true } });
+  await notifyUser({ recipientAccountId: id, event: "STAKEHOLDER_UPDATE", title: "Account status updated", message: `Your RentSure account status is now ${nextStatus.toLowerCase()}. Open your account for details.`,
+    actionUrl: account.accountType === "RENTER" ? "/account/renter/profile" : "/account/profile" });
+  return result;
 }
 
 export async function changeAdminRole(id: string, adminRole: AdminRole) {
   const user = await prisma.user.findFirst({ where: { id, role: "ADMIN" } });
   if (!user) throw new AppError("Admin user not found", 404, "USER_NOT_FOUND");
-  return prisma.user.update({ where: { id }, data: { adminRole }, select: { id: true, fullName: true, email: true, role: true, adminRole: true, status: true } });
+  const result = await prisma.user.update({ where: { id }, data: { adminRole }, select: { id: true, fullName: true, email: true, role: true, adminRole: true, status: true } });
+  await notifyUser({ recipientStaffId: id, event: "STAKEHOLDER_UPDATE", title: "Admin role changed",
+    message: `Your administrator role is now ${adminRole.replaceAll("_", " ").toLowerCase()}. Open your profile to review your access.`, actionUrl: "/app/profile" });
+  return result;
 }
 
 export async function createAdmin(input: { fullName: string; email: string; password: string; adminRole: AdminRole }) {
   const passwordHash = await bcrypt.hash(input.password, 12);
-  return prisma.user.create({ data: { fullName: input.fullName.trim(), email: input.email.trim().toLowerCase(), passwordHash, role: "ADMIN", adminRole: input.adminRole, status: "ACTIVE" }, select: { id: true, fullName: true, email: true, role: true, adminRole: true, status: true } });
+  const admin = await prisma.user.create({ data: { fullName: input.fullName.trim(), email: input.email.trim().toLowerCase(), passwordHash, role: "ADMIN", adminRole: input.adminRole, status: "ACTIVE" }, select: { id: true, fullName: true, email: true, role: true, adminRole: true, status: true } });
+  await notifyUser({ recipientStaffId: admin.id, event: "STAKEHOLDER_UPDATE", eventKey: `admin-created:${admin.id}`,
+    title: "Administrator account created", message: "Your RentSure administrator account has been created. Sign in using the credentials provided by your administrator.", actionUrl: "/login" });
+  return admin;
 }
 
 export async function addAdminNote(id: string, authorUserId: string, note: string) {
@@ -265,4 +286,3 @@ export async function sendManagedUserPasswordReset(id: string) {
   if (!account) throw new AppError("User not found", 404, "USER_NOT_FOUND");
   return requestPasswordReset(account.email);
 }
-

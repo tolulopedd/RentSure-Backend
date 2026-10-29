@@ -7,9 +7,12 @@ import {
   getRentScoreConfig,
   getRenterScoreDetails,
   recordRentScoreEvent,
+  listPendingIdentityReviews,
   replaceRentScoreEventsByCodes
 } from "../modules/rent-score/rent-score.service";
 import { getWorkspaceQueueItem, listWorkspaceQueue } from "../modules/workspace/workspace.service";
+
+import { submitRenterIdentityForReview } from "../modules/renter/renter.service";
 
 const email = `rent-score-test-${Date.now()}@example.com`;
 const results: Array<{
@@ -144,15 +147,49 @@ async function main() {
     await prisma.publicAccount.update({
       where: { id: account.id },
       data: {
-        identityReviewStatus: "APPROVED",
-        identityReviewedAt: now,
-        nin: "12345678901",
-        ninVerifiedAt: now,
         residenceMoveCount5y: 1,
         employmentType: "EMPLOYED",
         employmentYears: 1
       }
     });
+    const submitIdentity = (verificationType: "NIN" | "BVN", value: string) =>
+      submitRenterIdentityForReview({ publicAccountId: account.id, verificationType, value });
+    const governmentIdRule = adminConfig.rules.find((rule: any) => rule.code === "GOVERNMENT_ID_VERIFIED")!;
+    for (const verificationType of ["NIN", "BVN"] as const) {
+      for (const previousStatus of ["NOT_SUBMITTED", "PENDING", "FAILED"] as const) {
+        await prisma.publicAccount.update({
+          where: { id: account.id },
+          data: {
+            identityVerificationType: verificationType,
+            identityReviewStatus: previousStatus,
+            identityReviewComment: previousStatus === "FAILED" ? "Previous rejection" : null
+          }
+        });
+        await assert.rejects(submitIdentity(verificationType, "123"), { code: "VALIDATION_ERROR" });
+        const before = await snapshot(account.id);
+        const response = await submitIdentity(verificationType, "12345678901");
+        const identityAccount = await prisma.publicAccount.findUniqueOrThrow({ where: { id: account.id } });
+        assert.equal(identityAccount.identityReviewStatus, "APPROVED", `${verificationType} bypasses admin review from ${previousStatus}`);
+        assert.ok(verificationType === "NIN" ? identityAccount.ninVerifiedAt : identityAccount.bvnVerifiedAt);
+        assert.equal(identityAccount.identityReviewedByUserId, null);
+        assert.equal(identityAccount.identityReviewComment, null);
+        assert.equal(response.profile.identityReviewStatus, "APPROVED");
+        const after = await snapshot(account.id);
+        assert.equal(after.summary.score - before.summary.score, governmentIdRule.points, `${verificationType} applies configured identity points immediately`);
+        assert.equal((await listPendingIdentityReviews()).items.some((item) => item.accountId === account.id), false);
+
+        await submitIdentity(verificationType, "10987654321");
+        assert.equal((await snapshot(account.id)).summary.score, after.summary.score, `Replacing ${verificationType} must not duplicate points`);
+        assert.equal(await prisma.rentScoreEvent.count({ where: { publicAccountId: account.id, rule: { code: "GOVERNMENT_ID_VERIFIED" } } }), 1);
+        const updatedAccount = await prisma.publicAccount.findUniqueOrThrow({ where: { id: account.id } });
+        assert.equal(verificationType === "NIN" ? updatedAccount.nin : updatedAccount.bvn, "10987654321");
+      }
+    }
+    const beforeSwitch = await snapshot(account.id);
+    await submitIdentity("NIN", "12345678901");
+    await submitIdentity("BVN", "12345678901");
+    assert.equal((await snapshot(account.id)).summary.score, beforeSwitch.summary.score, "Switching identity types must not duplicate points");
+
     const beforeIdentity = current.summary.score;
     current = await snapshot(account.id);
     addResult("Identity and profile", "Government ID + 1 move + employed 1 year", beforeIdentity, current.summary.score, 220, 300);
@@ -429,4 +466,3 @@ void main().catch((error) => {
   console.error(error);
   process.exitCode = 1;
 });
-

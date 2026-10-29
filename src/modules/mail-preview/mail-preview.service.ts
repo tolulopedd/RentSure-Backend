@@ -228,4 +228,3 @@ export function renderMailPreviewDocument(record: MailPreviewRecord) {
   </body>
 </html>`;
 }
-

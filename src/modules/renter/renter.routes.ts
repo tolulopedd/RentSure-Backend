@@ -1,3 +1,4 @@
+import { informationResponseSchema, submitAdditionalInformation } from "./additional-information";
 import { Router } from "express";
 import { z } from "zod";
 import { AppError } from "../../common/errors/AppError";
@@ -23,6 +24,13 @@ const router = Router();
 const nigeriaPhoneSchema = z.string().trim().regex(/^(?:0\d{10}|\+234\d{10})$/, "Use 09052222022 or +2349052222022.");
 
 router.use("/renter", requireAuth, requirePublicRole("RENTER"));
+
+router.post("/renter/linked-cases/:id/additional-information", async (req, res, next) => {
+  try {
+    const id = z.string().uuid().parse(req.params.id);
+    res.json(await submitAdditionalInformation(req.user!.userId, id, informationResponseSchema.parse(req.body)));
+  } catch (error) { next(error instanceof z.ZodError ? new AppError(error.issues[0]?.message || "Invalid response", 400, "VALIDATION_ERROR") : error); }
+});
 
 const optionalProfileText = (min: number, max?: number) =>
   z.preprocess(

@@ -145,6 +145,7 @@ enum PublicDocumentType {
 }
 
 enum PublicNotificationType {
+  STAKEHOLDER_UPDATE
   AGENT_INVITE
   PROPERTY_LINKED
   PROPERTY_LINK_RESPONSE
@@ -214,6 +215,7 @@ model User {
   reviewedIdentityAccounts PublicAccount[] @relation("PublicAccountIdentityReviewedBy")
   adminNotes       AdminNote[] @relation("AdminNoteAuthor")
   managedNotes     AdminNote[]
+  notifications PublicAccountNotification[]
 
   @@index([role])
   @@index([status])
@@ -334,7 +336,9 @@ model PublicAccountDocument {
 
 model PublicAccountNotification {
   id              String                 @id @default(uuid())
-  publicAccountId String
+  publicAccountId String?
+  staffUserId     String?
+  eventKey        String? @unique
   notificationType PublicNotificationType
   title           String
   message         String
@@ -346,11 +350,14 @@ model PublicAccountNotification {
   readAt          DateTime?
   createdAt       DateTime               @default(now())
 
-  publicAccount   PublicAccount          @relation(fields: [publicAccountId], references: [id], onDelete: Cascade)
+  publicAccount   PublicAccount?          @relation(fields: [publicAccountId], references: [id], onDelete: Cascade)
+  staffUser       User? @relation(fields: [staffUserId], references: [id], onDelete: Cascade)
+  emailDelivery   NotificationEmail?
 
   @@index([publicAccountId, createdAt])
   @@index([publicAccountId, readAt, createdAt])
   @@index([relatedEntityType, relatedEntityId])
+  @@index([staffUserId, readAt, createdAt])
 }
 
 model RefreshToken {
@@ -664,6 +671,8 @@ model ProposedRenter {
   decision           ProposedRenterDecision?
   decisionAt         DateTime?
   decisionByAccountId String?
+  requestedInformation String[] @default([])
+  additionalInformationResponse Json?
   decisionNote       String?
   notes              String?
   createdAt          DateTime              @default(now())
@@ -828,3 +837,61 @@ model LandlordReferenceRequest {
   @@index([landlordAccountId, status, createdAt])
 }
 
+model NotificationEmail {
+  id String @id @default(uuid())
+  notificationId String? @unique
+  dedupeKey String? @unique
+  recipient String
+  subject String
+  html String
+  category String
+  attempts Int @default(0)
+  availableAt DateTime @default(now())
+  lockedUntil DateTime?
+  lockToken String?
+  deliveredAt DateTime?
+  lastError String?
+  createdAt DateTime @default(now())
+  notification PublicAccountNotification? @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+  @@index([deliveredAt, availableAt, lockedUntil])
+}
+
+model Conversation {
+  id String @id @default(uuid())
+  creationKey String @unique
+  subject String
+  contextType String @default("NONE")
+  contextId String?
+  contextLabel String?
+  lastSequence Int @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  participants ConversationParticipant[]
+  messages ConversationMessage[]
+  @@index([updatedAt])
+}
+model ConversationParticipant {
+  id String @id @default(uuid())
+  conversationId String
+  actorKey String
+  displayName String
+  role String
+  readThrough Int @default(0)
+  archivedAt DateTime?
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  sentMessages ConversationMessage[]
+  @@unique([conversationId, actorKey])
+  @@index([actorKey, archivedAt])
+}
+model ConversationMessage {
+  id String @id @default(uuid())
+  conversationId String
+  senderId String
+  requestKey String @unique
+  sequence Int
+  content String
+  createdAt DateTime @default(now())
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  sender ConversationParticipant @relation(fields: [senderId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  @@unique([conversationId, sequence])
+}

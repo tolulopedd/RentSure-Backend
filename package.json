@@ -13,7 +13,11 @@
     "prisma:gen": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "reset:non-user-data": "ts-node-dev --exit-child --transpile-only src/scripts/reset-non-user-data.ts",
-    "smoke:readiness": "ts-node-dev --exit-child --transpile-only src/scripts/smoke-readiness.ts"
+    "smoke:readiness": "ts-node-dev --exit-child --transpile-only src/scripts/smoke-readiness.ts",
+    "test:rent-score": "ts-node-dev --exit-child --transpile-only src/scripts/test-rent-score-engine.ts",
+    "test:notifications": "ts-node-dev --exit-child --transpile-only src/scripts/test-notifications.ts",
+    "test:messaging": "ts-node-dev --exit-child --transpile-only src/scripts/test-messaging.ts",
+    "test:score-metrics": "ts-node-dev --exit-child --transpile-only src/scripts/test-score-metric-propagation.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.19.2",

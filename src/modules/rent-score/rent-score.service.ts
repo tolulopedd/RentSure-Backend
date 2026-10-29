@@ -1,10 +1,8 @@
+import { randomUUID } from "node:crypto";
 import type { Prisma, PublicAccountStatus, RentScoreOverrideScope } from "@prisma/client";
 import { prisma } from "../../prisma/client";
-import { notifyUser } from "../notifications/notifications.service";
+import { notifyUser, notifyActiveRenters } from "../notifications/notifications.service";
 import { AppError } from "../../common/errors/AppError";
-import { env } from "../../config/env";
-import { renderTransactionalEmail } from "../mail/mail-templates";
-import { sendTransactionalMail } from "../mail/mail.service";
 
 const DEFAULT_POLICY_CODE = "DEFAULT";
 const REGISTRATION_RULE_CODE = "REGISTRATION_COMPLETED";
@@ -89,27 +87,6 @@ function publicAccountDisplayName(account: {
   if (account.organizationName?.trim()) return account.organizationName.trim();
   const name = [account.firstName, account.lastName].filter(Boolean).join(" ").trim();
   return name || account.email || "RentSure user";
-}
-
-async function createPublicAccountNotification(input: {
-  publicAccountId: string;
-  notificationType: "IDENTITY_REVIEW";
-  title: string;
-  message: string;
-  ctaLabel?: string;
-  ctaPath?: string;
-  metadata?: Prisma.JsonObject;
-}) {
-  await notifyUser({
-    recipientAccountId: input.publicAccountId,
-    event: input.notificationType,
-    title: input.title,
-    message: input.message,
-    actionLabel: input.ctaLabel,
-    actionUrl: input.ctaPath,
-    metadata: input.metadata,
-    sendEmail: false
-  });
 }
 
 const defaultRuleDefinitions: DefaultRuleDefinition[] = [
@@ -1321,6 +1298,14 @@ export async function getRentScoreConfig(tx: DbClient = prisma) {
   };
 }
 
+async function notifyScorePolicyChange(db: DbClient) {
+  const eventKey = `score-policy:${randomUUID()}`;
+  const run = (tx: DbClient) => notifyActiveRenters({ db: tx, eventKey,
+    title: "Rent Score rules updated", message: "RentSure updated its scoring rules. Your score uses the current rules; open your dashboard to review the latest breakdown.",
+    actionUrl: "/account/renter/dashboard" });
+  return db === prisma ? prisma.$transaction(run) : run(db);
+}
+
 export async function updateRentScoreCategory(
   categoryId: string,
   input: {
@@ -1373,6 +1358,7 @@ export async function updateRentScoreCategory(
       }
     });
 
+    await notifyScorePolicyChange(tx);
     return getRentScoreConfig(tx);
   });
 }
@@ -1391,6 +1377,7 @@ export async function deleteRentScoreCategory(categoryId: string) {
       }
     });
 
+    await notifyScorePolicyChange(tx);
     return getRentScoreConfig(tx);
   });
 }
@@ -1447,6 +1434,9 @@ export async function createRentScoreOverride(input: {
       });
     }
 
+    await notifyUser({ db: tx, recipientAccountId: input.publicAccountId, event: "STAKEHOLDER_UPDATE",
+      title: "Rent Score updated", message: "An administrator updated your Rent Score record. Open your score to review the current breakdown.",
+      actionUrl: "/account/renter/dashboard" });
     return buildRentScoreSnapshot(input.publicAccountId, tx);
   });
 }
@@ -1465,6 +1455,9 @@ export async function deleteRentScoreOverride(overrideId: string) {
       }
     });
 
+    await notifyUser({ db: tx, recipientAccountId: override.publicAccountId, event: "STAKEHOLDER_UPDATE",
+      title: "Rent Score updated", message: "An administrator updated your Rent Score record. Open your score to review the current breakdown.",
+      actionUrl: "/account/renter/dashboard" });
     return buildRentScoreSnapshot(override.publicAccountId, tx);
   });
 }
@@ -1495,6 +1488,7 @@ export async function updateRentScorePolicy(input: {
     }
   });
 
+  await notifyScorePolicyChange(prisma);
   return getRentScoreConfig();
 }
 
@@ -1529,6 +1523,7 @@ export async function createRentScoreRule(input: {
     }
   });
 
+  await notifyScorePolicyChange(prisma);
   return getRentScoreConfig();
 }
 
@@ -1609,6 +1604,7 @@ export async function updateRentScoreRule(
       }
     });
 
+    await notifyScorePolicyChange(tx);
     return getRentScoreConfig(tx);
   });
 }
@@ -1627,6 +1623,7 @@ export async function deleteRentScoreRule(ruleId: string) {
       }
     });
 
+    await notifyScorePolicyChange(tx);
     return getRentScoreConfig(tx);
   });
 }
@@ -1687,6 +1684,9 @@ export async function recordRentScoreEvent(input: {
       }
     });
 
+    await notifyUser({ db: tx, recipientAccountId: input.publicAccountId, event: "STAKEHOLDER_UPDATE",
+      title: "Rent Score updated", message: "An administrator updated your Rent Score record. Open your score to review the current breakdown.",
+      actionUrl: "/account/renter/dashboard" });
     return buildRentScoreSnapshot(input.publicAccountId, tx);
   });
 }
@@ -1760,6 +1760,9 @@ export async function deleteRentScoreEvent(eventId: string) {
     }
 
     await tx.rentScoreEvent.delete({ where: { id: eventId } });
+    await notifyUser({ db: tx, recipientAccountId: event.publicAccountId, event: "STAKEHOLDER_UPDATE",
+      title: "Rent Score updated", message: "An administrator updated your Rent Score record. Open your score to review the current breakdown.",
+      actionUrl: "/account/renter/dashboard" });
     return buildRentScoreSnapshot(event.publicAccountId, tx);
   });
 }
@@ -2011,54 +2014,14 @@ export async function reviewIdentitySubmission(input: {
             }
           : null
     });
+    await notifyUser({ db: tx, recipientAccountId: account.id, event: "IDENTITY_REVIEW",
+      eventKey: `identity-review:${account.id}:${reviewedAt.toISOString()}`,
+      title: input.action === "APPROVE" ? "Identity approved" : "Identity review needs an update",
+      message: input.action === "APPROVE"
+        ? `Your ${account.identityVerificationType} was approved and your Rent Score updated. Open your profile to review it.`
+        : `Your ${account.identityVerificationType} was not approved. ${input.comment?.trim()} Open your profile to update the details.`,
+      actionUrl: "/account/renter/profile" });
   });
-
-  const title =
-    input.action === "APPROVE" ? "Identity approved" : "Identity review needs an update";
-  const message =
-    input.action === "APPROVE"
-      ? `Your ${account.identityVerificationType} has been approved. Your renter profile and rent score have been updated.`
-      : `Your ${account.identityVerificationType} submission was not approved. ${input.comment?.trim()}`;
-
-  await createPublicAccountNotification({
-    publicAccountId: account.id,
-    notificationType: "IDENTITY_REVIEW",
-    title,
-    message,
-    ctaLabel: "Open",
-    ctaPath: "/account/renter/profile",
-    metadata: {
-      action: input.action,
-      verificationType: account.identityVerificationType,
-      comment: input.comment?.trim() || null
-    }
-  });
-
-  await sendTransactionalMail({
-    category: "RENTER_NOTIFICATION",
-    to: account.email,
-    subject: input.action === "APPROVE" ? "Your identity has been approved" : "Update your identity submission",
-    html: renderTransactionalEmail({
-      eyebrow: "Identity review",
-      title: input.action === "APPROVE" ? "Identity approved" : "Identity review update",
-      greeting: `Dear ${publicAccountDisplayName(account)},`,
-      paragraphs:
-        input.action === "APPROVE"
-          ? [
-              `Your ${account.identityVerificationType} has been reviewed and approved by the RentSure team.`,
-              "Your renter profile now reflects the approved identity check, and the related rent-score points have been applied."
-            ]
-          : [
-              `We reviewed your ${account.identityVerificationType} submission, but we could not approve it yet.`,
-              `Reason: ${input.comment?.trim()}`,
-              "Please return to your RentSure profile, correct the details, and submit the identity information again for review."
-            ],
-      ctaLabel: "Open",
-      ctaUrl: `${env.APP_WEB_BASE_URL}/account/renter/profile`,
-      closing: "Best regards,<br />RentSure Team"
-    })
-  });
-
   return buildRentScoreSnapshot(account.id);
 }
 
@@ -2071,4 +2034,3 @@ export async function getAuthenticatedRenterScore(publicAccountId: string) {
 }
 
 export type { RentScoreSnapshot, DefaultRuleDefinition };
-

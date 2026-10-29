@@ -204,4 +204,3 @@ router.post("/admin/admins", requireAuth, async (req, res, next) => {
 });
 
 export const userManagementRoutes = router;
-

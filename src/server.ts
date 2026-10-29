@@ -3,10 +3,13 @@ import { env } from "./config/env";
 import { logger } from "./common/logger/logger";
 import { prisma } from "./prisma/client";
 
+import { startNotificationEmailWorker } from "./modules/notifications/notification-email.service";
+
 const app = createApp();
 
 async function boot() {
   await prisma.$connect();
+  startNotificationEmailWorker();
 
   app.listen(env.PORT, () => {
     logger.info(`RentSure API running on http://localhost:${env.PORT}`);

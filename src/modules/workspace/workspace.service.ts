@@ -1,9 +1,11 @@
+import { Prisma } from "@prisma/client";
+import { informationResponseView } from "../renter/additional-information";
+import { recordNotifiableActivity } from "../notifications/stakeholder-events.service";
 import type {
   PaymentConfirmationOutcome,
   LandlordReferenceRecommendation,
   PaymentScheduleStatus,
   PaymentScheduleType,
-  Prisma,
   PropertyAgentInviteStatus,
   PropertyMemberRole,
   PublicAccount,
@@ -16,7 +18,7 @@ import { env } from "../../config/env";
 import { buildRentScoreSnapshot, replaceRentScoreEventsByCodes, syncUtilityPaymentHistoryEvent } from "../rent-score/rent-score.service";
 import { attachPassportPhotoToPublicAccount, buildPublicDocumentViewUrl, toPublicDocumentAsset } from "../storage/storage.service";
 import { renderTransactionalEmail } from "../mail/mail-templates";
-import { sendTransactionalMail } from "../mail/mail.service";
+import { queueTransactionalMail as sendTransactionalMail } from "../notifications/notification-email.service";
 import { getAvailableRentScorePaymentProviders } from "../score-payments/score-payments.service";
 import { notifyUser } from "../notifications/notifications.service";
 
@@ -179,9 +181,10 @@ async function notifyRenterOfDecision(input: {
   renterName: string;
   propertyAddress: string;
   note?: string | null;
+  tx?: DbClient;
 }) {
   const greetingName = input.renterName || "there";
-  const openAccountUrl = buildAppUrl("/account/renter/queue");
+  const openAccountUrl = buildAppUrl("/account/renter/cases");
   const trimmedNote = input.note?.trim() || null;
   const safeNote = trimmedNote ? escapeHtml(trimmedNote) : null;
 
@@ -224,6 +227,7 @@ async function notifyRenterOfDecision(input: {
           };
 
   return sendTransactionalMail({
+    db: input.tx,
     category: "RENTER_DECISION",
     to: input.renterEmail,
     subject: decisionCopy.subject,
@@ -243,10 +247,12 @@ async function notifyInvitedAgent(input: {
   propertySummaryLabel: string;
   propertyAddress: string;
   agentEmail: string;
+  tx?: DbClient;
 }) {
   const inviteUrl = buildAgentInviteUrl(input.agentEmail);
   const delivery = await sendTransactionalMail({
     category: "AGENT_INVITE",
+    db: input.tx,
     to: input.agentEmail,
     subject: "You’ve been invited to join RentSure as an agent",
     html: renderTransactionalEmail({
@@ -576,6 +582,8 @@ async function getAccessibleProposedRenter(publicAccountId: string, proposedRent
             decisionAt: true,
             decisionByAccountId: true,
             decisionNote: true,
+            requestedInformation: true,
+            additionalInformationResponse: true,
             notes: true,
             createdAt: true,
             updatedAt: true,
@@ -679,7 +687,7 @@ async function logProposedRenterActivity(input: {
   tx?: DbClient;
 }) {
   const client = input.tx ?? prisma;
-  await client.proposedRenterActivity.create({
+  await recordNotifiableActivity(client, {
     data: {
       proposedRenterId: input.proposedRenterId,
       actorAccountId: input.actorAccountId ?? null,
@@ -714,42 +722,6 @@ async function createPublicAccountNotification(input: {
   });
 }
 
-async function notifyRenterOfPaymentReview(input: {
-  renterAccountId: string;
-  paymentType: PaymentScheduleType;
-  propertyName: string;
-  propertyUnitLabel?: string | null;
-  outcome: PaymentConfirmationOutcome;
-  tx?: DbClient;
-}) {
-  const paymentLabel = input.paymentType.replaceAll("_", " ").toLowerCase();
-  const locationLabel = input.propertyUnitLabel?.trim()
-    ? `${input.propertyName} (${input.propertyUnitLabel.trim()})`
-    : input.propertyName;
-
-  const message =
-    input.outcome === "FULL"
-      ? `Your ${paymentLabel} proof for ${locationLabel} was confirmed in full. Your rent score has been updated.`
-      : `Your ${paymentLabel} proof for ${locationLabel} was marked as partial. Your rent score has been updated. Start a new payment if you need to send the balance.`;
-
-  await createPublicAccountNotification({
-    publicAccountId: input.renterAccountId,
-    notificationType: "PAYMENT_UPDATE",
-    title: input.outcome === "FULL" ? "Payment confirmed" : "Payment marked partial",
-    message,
-    ctaLabel: "Open payments",
-    ctaPath: "/account/renter/payments",
-    metadata: {
-      paymentType: input.paymentType,
-      propertyName: input.propertyName,
-      propertyUnitLabel: input.propertyUnitLabel ?? null,
-      outcome: input.outcome
-    } as Prisma.JsonObject,
-    sendEmail: true,
-    tx: input.tx
-  });
-}
-
 async function notifyProposedRenter(input: {
   requestedByAccountId: string;
   requestedByName: string;
@@ -777,6 +749,7 @@ async function notifyProposedRenter(input: {
   const signInCopy = "Sign in to your RentSure account to review the linked property and landlord details.";
   const delivery = await sendTransactionalMail({
     category: isExistingMember ? "RENTER_NOTIFICATION" : "RENTER_INVITE",
+    db: input.tx,
     to: input.renterEmail,
     subject: isExistingMember ? existingMemberSubject : inviteSubject,
     html: renderTransactionalEmail({
@@ -1388,6 +1361,13 @@ export async function updateWorkspaceProperty(input: {
       }))
     });
 
+    const linkedRenters = await tx.proposedRenter.findMany({ where: { propertyId: membership.propertyId, renterAccountId: { not: null }, renterLinkResponseStatus: "ACCEPTED" }, select: { renterAccountId: true } });
+    const recipients = new Set([...membership.property.members.map(member => member.publicAccountId), ...linkedRenters.map(item => item.renterAccountId!)]);
+    recipients.delete(input.publicAccountId);
+    for (const id of recipients) await notifyUser({ db: tx, recipientAccountId: id, event: "STAKEHOLDER_UPDATE",
+      title: "Property details updated", message: `${input.name.trim()}: the landlord updated the property or unit details. Open the property to review the changes.`,
+      actionUrl: linkedRenters.some(item => item.renterAccountId === id) ? "/account/renter/cases" : `/account/properties?propertyId=${membership.propertyId}` });
+
     return listWorkspaceProperties(input.publicAccountId);
   });
 }
@@ -1478,7 +1458,8 @@ export async function shareWorkspaceProperty(input: {
       landlordName: publicAccountDisplayName(currentAccount),
       propertySummaryLabel: membership.property.name,
       propertyAddress: formatPropertyAddress(membership.property),
-      agentEmail: sharedWithEmail
+      agentEmail: sharedWithEmail,
+      tx
     });
 
     return {
@@ -1522,6 +1503,12 @@ export async function respondToWorkspaceAgentInvite(input: {
     if (!invite) {
       throw new AppError("Property invite not found", 404, "PROPERTY_AGENT_INVITE_NOT_FOUND");
     }
+
+    await notifyUser({ db: tx, recipientAccountId: invite.invitedByAccountId, event: "AGENT_INVITE",
+      eventKey: `agent-invite:${invite.id}:${input.action}:${invite.updatedAt.toISOString()}`,
+      title: input.action === "ACCEPT" ? "Agent accepted property invite" : "Agent declined property invite",
+      message: `${publicAccountDisplayName(currentAccount)} ${input.action === "ACCEPT" ? "accepted" : "declined"} your invitation to manage ${invite.property.name}. Open the property to review its management details.`,
+      actionUrl: `/account/properties?propertyId=${invite.propertyId}` });
 
     if (input.action === "DECLINE") {
       await tx.propertyAgentInvite.update({
@@ -1575,6 +1562,19 @@ export async function respondToWorkspaceAgentInvite(input: {
         respondedAt
       }
     });
+
+    const supersededInvites = await tx.propertyAgentInvite.findMany({
+      where: { propertyId: invite.propertyId, id: { not: invite.id }, status: "PENDING" }
+    });
+    for (const superseded of supersededInvites) {
+      if (superseded.recipientAccountId) await notifyUser({ db: tx, recipientAccountId: superseded.recipientAccountId,
+        event: "AGENT_INVITE", eventKey: `agent-invite-closed:${superseded.id}:${respondedAt.toISOString()}`,
+        title: "Property invitation closed", message: `Your invitation for ${invite.property.name} is no longer available because an agent has been assigned. Open Properties to review your invitations.`,
+        actionUrl: "/account/properties" });
+      else await sendTransactionalMail({ db: tx, category: "AGENT_INVITE", to: superseded.recipientEmail,
+        subject: "Property invitation closed", html: renderTransactionalEmail({ title: "Property invitation closed",
+          paragraphs: ["A property invitation is no longer available because an agent has been assigned."], ctaLabel: "Open RentSure", ctaUrl: buildAppUrl("/login") }) });
+    }
 
     await tx.propertyAgentInvite.updateMany({
       where: {
@@ -1676,7 +1676,7 @@ export async function listWorkspaceQueue(publicAccountId: string) {
           take: 4
         }
       },
-      orderBy: { createdAt: "desc" }
+      orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }, { id: "desc" }]
     } as any)
     .catch((error: unknown) => {
       if (isMissingProposedRenterPropertyUnitColumn(error)) {
@@ -1702,6 +1702,7 @@ export async function listWorkspaceQueue(publicAccountId: string) {
             state: true,
             status: true,
             createdAt: true,
+            updatedAt: true,
             decisionBy: true,
             property: {
               include: {
@@ -1731,7 +1732,7 @@ export async function listWorkspaceQueue(publicAccountId: string) {
               take: 4
             }
           },
-          orderBy: { createdAt: "desc" }
+          orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }, { id: "desc" }]
         });
       }
       throw error;
@@ -1744,6 +1745,7 @@ export async function listWorkspaceQueue(publicAccountId: string) {
         const latestScoreRequest = item.scoreRequests[0] || null;
         return {
           id: item.id,
+          updatedAt: item.updatedAt,
           firstName: item.firstName,
           lastName: item.lastName,
           organizationName: item.organizationName,
@@ -1992,6 +1994,8 @@ export async function getWorkspaceQueueItem(publicAccountId: string, proposedRen
     renterLinkRespondedAt: item.renterLinkRespondedAt,
     renterLinkResponseNote: item.renterLinkResponseNote,
     notes: item.notes,
+    requestedInformation: item.requestedInformation,
+    additionalInformationResponse: informationResponseView(item.additionalInformationResponse),
     linkedRentScore,
     linkedRentScoreReport,
     decision: item.decision
@@ -2757,7 +2761,7 @@ export async function resendPendingRenterInvite(input: {
     existingAccountId: proposedRenter.renterAccount?.status === "ACTIVE" ? proposedRenter.renterAccount.id : null
   });
 
-  await prisma.proposedRenterActivity.create({
+  await recordNotifiableActivity(prisma, {
     data: {
       proposedRenterId: proposedRenter.id,
       actorAccountId: null,
@@ -2781,14 +2785,31 @@ export async function decideWorkspaceProposedRenter(input: {
   proposedRenterId: string;
   decision: ProposedRenterDecision;
   note?: string;
+  requestedInformation?: string[];
 }) {
   const result = await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${"additional-information:" + input.proposedRenterId}, 0))`;
     const account = await getWorkspaceAccount(input.publicAccountId, tx);
     if (account.accountType !== "LANDLORD") {
       throw new AppError("Only landlord accounts can take approve, hold, or decline decisions", 403, "FORBIDDEN");
     }
 
     const proposedRenter = await getAccessibleProposedRenter(input.publicAccountId, input.proposedRenterId, tx);
+    const requestedInformation = [...new Set(input.requestedInformation ?? [])].sort();
+    if (requestedInformation.some(value => !["Work History", "Work Reference Letter"].includes(value)) ||
+        (input.decision === "HOLD" && !requestedInformation.length) ||
+        (input.decision !== "HOLD" && requestedInformation.length)) {
+      throw new AppError("Select the information the renter must provide", 400, "VALIDATION_ERROR");
+    }
+    const requestUnchanged = input.decision === proposedRenter.decision && proposedRenter.decisionByAccountId === input.publicAccountId &&
+      (input.note?.trim() || null) === proposedRenter.decisionNote &&
+      JSON.stringify(requestedInformation) === JSON.stringify([...(proposedRenter.requestedInformation ?? [])].sort());
+    if (proposedRenter.decision === "HOLD" && proposedRenter.requestedInformation?.length &&
+        !informationResponseView(proposedRenter.additionalInformationResponse)?.submittedAt) {
+      // A retry of the original request is harmless; new decisions must await the renter.
+      if (requestUnchanged) return { proposedRenterId: proposedRenter.id };
+      throw new AppError("Wait for the renter to submit the requested information before making another decision", 409, "RENTER_INFORMATION_PENDING");
+    }
     const nextStatus = input.decision === "HOLD" ? "UNDER_REVIEW" : "DECISION_READY";
 
     if (input.decision === "APPROVED" && proposedRenter.propertyUnitId) {
@@ -2818,7 +2839,9 @@ export async function decideWorkspaceProposedRenter(input: {
       where: { id: proposedRenter.id },
       data: {
         decision: input.decision,
-        decisionAt: new Date(),
+        decisionAt: requestUnchanged ? proposedRenter.decisionAt : new Date(),
+        requestedInformation: input.decision === "HOLD" ? requestedInformation : proposedRenter.requestedInformation,
+        ...(input.decision === "HOLD" && !requestUnchanged ? { additionalInformationResponse: Prisma.DbNull } : {}),
         decisionByAccountId: input.publicAccountId,
         decisionNote: input.note?.trim() || null,
         status: nextStatus
@@ -2876,10 +2899,8 @@ export async function decideWorkspaceProposedRenter(input: {
       proposedRenterId: proposedRenter.id,
       actorAccountId: input.publicAccountId,
       activityType: "DECISION",
-      message: `Landlord decision recorded as ${input.decision.toLowerCase()}.`,
-      metadata: input.note?.trim()
-        ? ({ note: input.note.trim(), decision: input.decision } as Prisma.JsonObject)
-        : ({ decision: input.decision } as Prisma.JsonObject),
+      message: input.decision === "HOLD" ? `The landlord requested: ${requestedInformation.join(", ")}.${input.note?.trim() ? " Note: " + input.note.trim() : ""}` : `Landlord decision recorded as ${input.decision.toLowerCase()}.`,
+      metadata: { decision: input.decision, note: input.note?.trim() || null, requestedInformation },
       tx
     });
 
@@ -2898,13 +2919,14 @@ export async function decideWorkspaceProposedRenter(input: {
           state: proposedRenter.property.state
         });
 
-    if (proposedRenter.email?.trim()) {
+    if (!proposedRenter.renterAccountId && proposedRenter.email?.trim()) {
       const delivery = await notifyRenterOfDecision({
         decision: input.decision,
         renterEmail: proposedRenter.email.trim(),
         renterName,
         propertyAddress,
-        note: input.note
+        note: input.decision === "HOLD" ? `Requested: ${requestedInformation.join(", ")}. ${input.note || ""}` : input.note,
+        tx
       });
 
       logger.info(
@@ -2918,25 +2940,6 @@ export async function decideWorkspaceProposedRenter(input: {
         },
         "Renter decision notification sent"
       );
-    }
-
-    if (proposedRenter.renterAccountId && input.decision !== "HOLD") {
-      await notifyUser({
-        recipientAccountId: proposedRenter.renterAccountId,
-        event: input.decision === "APPROVED" ? "APPLICATION_APPROVED" : "APPLICATION_REJECTED",
-        title: input.decision === "APPROVED" ? "Rental application approved" : "Rental application declined",
-        message:
-          input.decision === "APPROVED"
-            ? `Your application for ${propertyAddress} was approved by the landlord.`
-            : `Your application for ${propertyAddress} was declined by the landlord.`,
-        actionLabel: "Open landlord decision",
-        actionUrl: "/account/renter/cases",
-        relatedEntityType: "PROPOSED_RENTER",
-        relatedEntityId: proposedRenter.id,
-        metadata: { decision: input.decision, propertyAddress } as Prisma.JsonObject,
-        sendEmail: false,
-        db: tx
-      });
     }
 
     return { proposedRenterId: proposedRenter.id };
@@ -3329,17 +3332,6 @@ export async function confirmWorkspacePaymentSchedule(input: {
 
     if (schedule.paymentType === "UTILITY" && schedule.proposedRenter?.renterAccountId) {
       await syncUtilityPaymentHistoryEvent(schedule.proposedRenter.renterAccountId, tx);
-    }
-
-    if (schedule.proposedRenter?.renterAccountId) {
-      await notifyRenterOfPaymentReview({
-        renterAccountId: schedule.proposedRenter.renterAccountId,
-        paymentType: schedule.paymentType,
-        propertyName: schedule.property.name,
-        propertyUnitLabel: schedule.proposedRenter.propertyUnit?.label ?? null,
-        outcome: input.outcome,
-        tx
-      });
     }
 
     return { proposedRenterId: schedule.proposedRenterId };

@@ -42,4 +42,3 @@ export function requirePublicRole(...roles: PublicAccountType[]) {
     }
   };
 }
-

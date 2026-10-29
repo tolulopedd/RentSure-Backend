@@ -1,3 +1,4 @@
+import { messagingRoutes } from "./modules/messaging/messaging.routes";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -66,6 +67,7 @@ export function createApp() {
   app.use("/api", storageRoutes);
   app.use("/api", userManagementRoutes);
   app.use("/api", notificationsRoutes);
+  app.use("/api", messagingRoutes);
   if (process.env.NODE_ENV !== "production") {
     app.use("/api", mailPreviewRoutes);
   }
@@ -83,4 +85,3 @@ export function createApp() {
 
   return app;
 }
-

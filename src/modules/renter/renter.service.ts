@@ -1,11 +1,12 @@
+import { informationResponseView } from "./additional-information";
+import { recordNotifiableActivity } from "../notifications/stakeholder-events.service";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../../prisma/client";
 import { AppError } from "../../common/errors/AppError";
 import { buildRentScoreSnapshot, replaceRentScoreEventsByCodes, syncUtilityPaymentHistoryEvent } from "../rent-score/rent-score.service";
 import { attachPassportPhotoToPublicAccount, buildPublicDocumentViewUrl, toPublicDocumentAsset } from "../storage/storage.service";
-import { createMailPreview } from "../mail-preview/mail-preview.service";
 import { renderInfoPanel, renderTransactionalEmail } from "../mail/mail-templates";
-import { sendTransactionalMail } from "../mail/mail.service";
+import { queueTransactionalMail as sendTransactionalMail } from "../notifications/notification-email.service";
 import { getAvailableRentScorePaymentProviders } from "../score-payments/score-payments.service";
 import { notifyUser } from "../notifications/notifications.service";
 import { env } from "../../config/env";
@@ -17,28 +18,6 @@ function normalizeEmail(email: string) {
 function publicAccountDisplayName(account: { firstName: string; lastName: string; organizationName?: string | null }) {
   if (account.organizationName?.trim()) return account.organizationName.trim();
   return [account.firstName, account.lastName].filter(Boolean).join(" ");
-}
-
-async function createPublicAccountNotification(input: {
-  publicAccountId: string;
-  notificationType: "PROPERTY_LINKED" | "PROPERTY_LINK_RESPONSE" | "PAYMENT_UPDATE" | "IDENTITY_REVIEW";
-  title: string;
-  message: string;
-  ctaLabel?: string;
-  ctaPath?: string;
-  metadata?: Prisma.JsonObject;
-  sendEmail?: boolean;
-}) {
-  await notifyUser({
-    recipientAccountId: input.publicAccountId,
-    event: input.notificationType,
-    title: input.title,
-    message: input.message,
-    actionLabel: input.ctaLabel,
-    actionUrl: input.ctaPath,
-    metadata: input.metadata,
-    sendEmail: input.sendEmail ?? false
-  });
 }
 
 function rentScoreBandLabel(scoreBand: string) {
@@ -176,6 +155,9 @@ function getLinkedRenterCases(publicAccountId: string) {
             status: true,
             decision: true,
             decisionNote: true,
+            decisionAt: true,
+            requestedInformation: true,
+            additionalInformationResponse: true,
             property: true,
             propertyUnit: true,
             scoreRequests: {
@@ -250,7 +232,7 @@ async function logRenterActivity(input: {
   message: string;
   metadata?: Prisma.JsonObject;
 }) {
-  await prisma.proposedRenterActivity.create({
+  await recordNotifiableActivity(prisma, {
     data: {
       proposedRenterId: input.proposedRenterId,
       actorAccountId: input.actorAccountId,
@@ -259,101 +241,6 @@ async function logRenterActivity(input: {
       metadata: input.metadata
     }
   });
-}
-
-async function notifyLinkedPropertyStakeholders(input: {
-  linkedCaseId: string;
-  renterName: string;
-  renterEmail: string;
-  propertyAddress: string;
-  responseStatus: "ACCEPTED" | "WITHDRAWN";
-  responseNote?: string | null;
-}) {
-  const linkedCase = await prisma.proposedRenter.findUnique({
-    where: { id: input.linkedCaseId },
-    include: {
-      property: {
-        include: {
-          members: {
-            include: {
-              account: true
-            }
-          }
-        }
-      },
-      requestedBy: true
-    }
-  });
-
-  if (!linkedCase) return;
-
-  const recipients = new Map<string, { id: string; email: string; name: string }>();
-  linkedCase.property.members.forEach((member) => {
-    if (member.role === "LANDLORD" || member.publicAccountId === linkedCase.requestedByAccountId) {
-      recipients.set(member.account.id, {
-        id: member.account.id,
-        email: member.account.email,
-        name: publicAccountDisplayName(member.account)
-      });
-    }
-  });
-
-  if (
-    (linkedCase.requestedBy.accountType === "LANDLORD" || linkedCase.requestedBy.accountType === "AGENT") &&
-    linkedCase.requestedBy.status === "ACTIVE"
-  ) {
-    recipients.set(linkedCase.requestedBy.id, {
-      id: linkedCase.requestedBy.id,
-      email: linkedCase.requestedBy.email,
-      name: publicAccountDisplayName(linkedCase.requestedBy)
-    });
-  }
-
-  const title =
-    input.responseStatus === "ACCEPTED"
-      ? `${input.renterName} accepted the property link`
-      : `${input.renterName} withdrew from the property link`;
-  const message =
-    input.responseStatus === "ACCEPTED"
-      ? `${input.renterName} accepted the property link for ${input.propertyAddress}.`
-      : `${input.renterName} withdrew from the property link for ${input.propertyAddress}.`;
-
-  await Promise.all(
-    Array.from(recipients.values()).map(async (recipient) => {
-      await prisma.publicAccountNotification.create({
-        data: {
-          publicAccountId: recipient.id,
-          notificationType: "PROPERTY_LINK_RESPONSE" as any,
-          title,
-          message,
-          ctaLabel: "Open Link Tenant",
-          ctaPath: "/account/queue",
-          metadata: {
-            linkedCaseId: input.linkedCaseId,
-            renterEmail: input.renterEmail,
-            responseStatus: input.responseStatus
-          } satisfies Prisma.JsonObject
-        }
-      });
-
-      await sendTransactionalMail({
-        category: "PROPERTY_LINK_RESPONSE",
-        to: recipient.email,
-        subject: input.responseStatus === "ACCEPTED" ? "Renter accepted property link" : "Renter withdrew from property link",
-        html: renderTransactionalEmail({
-          eyebrow: "Property Link Update",
-          title,
-          greeting: `Dear ${recipient.name},`,
-          paragraphs: [
-            `${input.renterName} has ${input.responseStatus === "ACCEPTED" ? "accepted" : "withdrawn from"} the property link for <strong>${input.propertyAddress}</strong>.`,
-            input.responseNote?.trim() ? `Renter note: ${input.responseNote.trim()}` : "Open RentSure to review the linked tenant record."
-          ],
-          ctaLabel: "Open linked tenant",
-          ctaUrl: `${env.APP_WEB_BASE_URL.replace(/\/+$/, "")}/account/queue`
-        })
-      });
-    })
-  );
 }
 
 function buildRenterScoreSharePayload(input: {
@@ -570,7 +457,7 @@ export async function getRenterDashboard(publicAccountId: string) {
       activeLinkedCases: linkedCases.length,
       pendingSchedules: linkedCases.flatMap((item) => item.paymentSchedules).filter((schedule) => schedule.status !== "PAID").length,
       profileCompletenessPercent: Math.round((profileCompleteness / 5) * 100),
-      unreadNotifications: notifications.filter((item) => !item.readAt).length
+      unreadNotifications: await prisma.publicAccountNotification.count({ where: { publicAccountId, readAt: null } })
     },
     reportAccess: {
       canShareOrDownload: true
@@ -631,6 +518,9 @@ export async function getRenterDashboard(publicAccountId: string) {
       renterLinkResponseNote: "renterLinkResponseNote" in item ? ((item as any).renterLinkResponseNote ?? null) : null,
       decision: item.decision,
       decisionNote: item.decisionNote,
+      informationRequestedAt: item.decisionAt,
+      requestedInformation: item.requestedInformation,
+      additionalInformationResponse: informationResponseView(item.additionalInformationResponse),
       property: {
         id: item.property.id,
         name: item.property.name,
@@ -731,7 +621,9 @@ export async function updateRenterProfile(input: {
 }) {
   await getRenterAccount(input.publicAccountId);
 
-  await prisma.publicAccount.update({
+  await prisma.$transaction(async tx => {
+    const before = await buildRentScoreSnapshot(input.publicAccountId, tx);
+    await tx.publicAccount.update({
     where: { id: input.publicAccountId },
     data: {
       firstName: input.firstName?.trim(),
@@ -747,6 +639,11 @@ export async function updateRenterProfile(input: {
       employmentYears: input.employmentYears === undefined ? undefined : input.employmentYears,
       notes: input.notes === undefined ? undefined : input.notes?.trim() || null
     }
+  });
+    const after = await buildRentScoreSnapshot(input.publicAccountId, tx);
+    if (before.summary.score !== after.summary.score) await notifyUser({ db: tx, recipientAccountId: input.publicAccountId,
+      event: "STAKEHOLDER_UPDATE", title: "Rent Score updated", message: `Your profile changes updated your Rent Score from ${before.summary.score} to ${after.summary.score}. Open your dashboard to review the breakdown.`,
+      actionUrl: "/account/renter/dashboard" });
   });
 
   return getRenterDashboard(input.publicAccountId);
@@ -775,40 +672,37 @@ export async function submitRenterIdentityForReview(input: {
     throw new AppError(`${input.verificationType} must be 11 digits`, 400, "VALIDATION_ERROR");
   }
 
-  if (account.identityReviewStatus === "PENDING") {
-    throw new AppError("Your identity submission is already pending review", 409, "IDENTITY_REVIEW_PENDING");
-  }
+  const submittedAt = new Date();
+  await prisma.$transaction(async (tx) => {
+    await tx.publicAccount.update({
+      where: { id: account.id },
+      data: {
+        ...(input.verificationType === "NIN"
+          ? { nin: cleanValue, ninVerifiedAt: submittedAt }
+          : { bvn: cleanValue, bvnVerifiedAt: submittedAt }),
+        identityVerificationType: input.verificationType,
+        identitySubmittedAt: submittedAt,
+        identityReviewStatus: "APPROVED",
+        identityReviewedAt: submittedAt,
+        identityReviewedByUserId: null,
+        identityReviewComment: null
+      }
+    });
 
-  await prisma.publicAccount.update({
-    where: { id: account.id },
-    data:
-      input.verificationType === "NIN"
-        ? {
-            nin: cleanValue,
-            ninVerifiedAt: null,
-            identityVerificationType: "NIN",
-            identitySubmittedAt: new Date(),
-            identityReviewStatus: "PENDING",
-            identityReviewedAt: null,
-            identityReviewedByUserId: null,
-            identityReviewComment: null
-          }
-        : {
-            bvn: cleanValue,
-            bvnVerifiedAt: null,
-            identityVerificationType: "BVN",
-            identitySubmittedAt: new Date(),
-            identityReviewStatus: "PENDING",
-            identityReviewedAt: null,
-            identityReviewedByUserId: null,
-            identityReviewComment: null
-          }
-  });
-
-  await replaceRentScoreEventsByCodes({
-    publicAccountId: account.id,
-    codes: ["GOVERNMENT_ID_VERIFIED"],
-    newEvent: null
+    await replaceRentScoreEventsByCodes({
+      publicAccountId: account.id,
+      tx,
+      codes: ["GOVERNMENT_ID_VERIFIED"],
+      newEvent: {
+        ruleCode: "GOVERNMENT_ID_VERIFIED",
+        occurredAt: submittedAt,
+        sourceNote: `${input.verificationType} updated by renter; automatically applied to rent score`
+      }
+    });
+    if (account.identityReviewStatus !== "APPROVED" || account.identityVerificationType !== input.verificationType || (input.verificationType === "NIN" ? account.nin : account.bvn) !== cleanValue) await notifyUser({ db: tx, recipientAccountId: account.id, event: "VERIFICATION_COMPLETE",
+      eventKey: `identity:${account.id}:${submittedAt.toISOString()}`, title: `${input.verificationType} updated`,
+      message: `Your ${input.verificationType} was saved and your Rent Score recalculated automatically. Open your profile to review it.`,
+      actionUrl: "/account/renter/profile" });
   });
   return getRenterDashboard(account.id);
 }
@@ -958,31 +852,6 @@ export async function initiateRenterPaymentConfirmation(input: {
     } as Prisma.JsonObject
   });
 
-  const landlordMembers = schedule.property.members.filter((member) => member.role === "LANDLORD");
-  const paymentLabel = schedule.paymentType.replaceAll("_", " ").toLowerCase();
-  const locationLabel = schedule.proposedRenter.propertyUnit?.label?.trim()
-    ? `${schedule.property.name} (${schedule.proposedRenter.propertyUnit.label.trim()})`
-    : schedule.property.name;
-
-  await Promise.all(
-    landlordMembers.map((member) =>
-      createPublicAccountNotification({
-        publicAccountId: member.publicAccountId,
-        notificationType: "PAYMENT_UPDATE",
-        title: "Payment proof submitted",
-        message: `A renter submitted ${paymentLabel} proof for ${locationLabel}. Review it in Payments.`,
-        ctaLabel: "Open payments",
-        ctaPath: "/account/payments",
-        metadata: {
-          paymentScheduleId: schedule.id,
-          proposedRenterId: schedule.proposedRenterId,
-          paymentType: schedule.paymentType
-        } as Prisma.JsonObject,
-        sendEmail: true
-      })
-    )
-  );
-
   return getRenterDashboard(input.publicAccountId);
 }
 
@@ -1074,31 +943,6 @@ export async function createSelfInitiatedRenterPayment(input: {
     } as Prisma.JsonObject
   });
 
-  const landlordMembers = linkedCase.property.members.filter((member) => member.role === "LANDLORD");
-  const paymentLabel = input.paymentType.replaceAll("_", " ").toLowerCase();
-  const locationLabel = linkedCase.propertyUnit?.label?.trim()
-    ? `${linkedCase.property.name} (${linkedCase.propertyUnit.label.trim()})`
-    : linkedCase.property.name;
-
-  await Promise.all(
-    landlordMembers.map((member) =>
-      createPublicAccountNotification({
-        publicAccountId: member.publicAccountId,
-        notificationType: "PAYMENT_UPDATE",
-        title: "New payment submitted",
-        message: `A renter submitted ${paymentLabel} proof for ${locationLabel}. Review it in Payments.`,
-        ctaLabel: "Open payments",
-        ctaPath: "/account/payments",
-        metadata: {
-          linkedCaseId: linkedCase.id,
-          propertyId: linkedCase.propertyId,
-          paymentType: input.paymentType
-        } as Prisma.JsonObject,
-        sendEmail: true
-      })
-    )
-  );
-
   return getRenterDashboard(input.publicAccountId);
 }
 
@@ -1151,7 +995,7 @@ export async function acceptRenterScoreRequest(input: { publicAccountId: string;
       forwardedTo: latestRequest.forwardedTo
     });
 
-    await tx.proposedRenterActivity.create({
+    await recordNotifiableActivity(tx, {
       data: {
         proposedRenterId: linkedCase.id,
         actorAccountId: input.publicAccountId,
@@ -1223,7 +1067,7 @@ export async function respondToLinkedProperty(input: {
       } as any
     });
 
-    await tx.proposedRenterActivity.create({
+    await recordNotifiableActivity(tx, {
       data: {
         proposedRenterId: linkedCase.id,
         actorAccountId: input.publicAccountId,
@@ -1239,15 +1083,6 @@ export async function respondToLinkedProperty(input: {
         } satisfies Prisma.JsonObject
       }
     });
-  });
-
-  await notifyLinkedPropertyStakeholders({
-    linkedCaseId: linkedCase.id,
-    renterName: publicAccountDisplayName(account),
-    renterEmail: account.email,
-    propertyAddress: [linkedCase.property.address, linkedCase.property.city, linkedCase.property.state].filter(Boolean).join(", "),
-    responseStatus: nextStatus,
-    responseNote: input.note || null
   });
 
   return getRenterDashboard(input.publicAccountId);
@@ -1307,7 +1142,7 @@ export async function requestLandlordReference(input: {
         }
       });
 
-      await tx.proposedRenterActivity.create({
+      await recordNotifiableActivity(tx, {
         data: {
           proposedRenterId: linkedCase.id,
           actorAccountId: input.publicAccountId,
@@ -1493,7 +1328,10 @@ export async function shareRenterScoreReport(input: {
         value: `${rentScore.summary.score} / ${rentScore.summary.maxScore}`,
         note: `Band: ${rentScoreBandLabel(rentScore.summary.scoreBand)}`
       });
-      const legacySharePreview = createMailPreview({
+      if (recipientAccount) await notifyUser({ recipientAccountId: recipientAccount.id, event: "STAKEHOLDER_UPDATE",
+        title: "Rent Score report shared with you", message: `A renter shared a Rent Score of ${rentScore.summary.score}/${rentScore.summary.maxScore} with you.`,
+        actionUrl: "/account/notifications", sendEmail: false });
+      const legacySharePreview = await sendTransactionalMail({
         category: "RENTER_SHARE_REPORT",
         to: recipientEmail,
         subject: "RentSure rent score report shared with you",
@@ -1501,7 +1339,8 @@ export async function shareRenterScoreReport(input: {
           eyebrow: "Rent Score Shared",
           title: "Rent score report shared with you",
           greeting: "Hello,",
-          paragraphs: [`${publicAccountDisplayName(account)} has shared a RentSure rent score report with you.`],
+          paragraphs: ["A renter has shared a RentSure rent score with you."],
+          ctaLabel: "Open RentSure", ctaUrl: `${env.APP_WEB_BASE_URL.replace(/\/+$/, "")}${recipientAccount ? "/account/notifications" : "/signup"}`,
           sectionHtml: scorePanel
         })
       });
@@ -1549,7 +1388,7 @@ export async function shareRenterScoreReport(input: {
           })
         : null;
 
-      await tx.proposedRenterActivity.create({
+      await recordNotifiableActivity(tx, {
         data: {
           proposedRenterId: linkedCase.id,
           actorAccountId: input.publicAccountId,
@@ -1572,21 +1411,18 @@ export async function shareRenterScoreReport(input: {
     value: `${rentScore.summary.score} / ${rentScore.summary.maxScore}`,
     note: `Band: ${rentScoreBandLabel(rentScore.summary.scoreBand)}`
   });
-  const sharePreview = createMailPreview({
-    category: "RENTER_SHARE_REPORT",
-    to: recipientEmail,
-    subject: "RentSure rent score report shared with you",
-    html: renderTransactionalEmail({
-      eyebrow: "Rent Score Shared",
-      title: "Rent score report shared with you",
-      greeting: "Hello,",
-      paragraphs: [
-        `${publicAccountDisplayName(account)} has shared a RentSure rent score report with you.`,
-        ...(input.note?.trim() ? [`<strong>Note:</strong> ${input.note.trim()}`] : []),
-        "This preview shows the outbound share email in development while live email delivery is still being connected."
-      ],
-      sectionHtml: scorePanel
-    })
+  const sharePath = recipientAccount ? "/account/notifications" : `/signup?track=${recipientType}&email=${encodeURIComponent(recipientEmail)}`;
+  if (recipientAccount) {
+    await notifyUser({ recipientAccountId: recipientAccount.id, event: "STAKEHOLDER_UPDATE",
+      title: "Rent Score report shared with you", message: `${publicAccountDisplayName(account)} shared a Rent Score of ${rentScore.summary.score}/${rentScore.summary.maxScore} (${rentScoreBandLabel(rentScore.summary.scoreBand)}). Review the shared score in your notification history.`,
+      actionUrl: sharePath, sendEmail: false });
+  }
+  const sharePreview = await sendTransactionalMail({
+    category: "RENTER_SHARE_REPORT", to: recipientEmail, subject: "RentSure rent score report shared with you",
+    html: renderTransactionalEmail({ eyebrow: "Rent Score Shared", title: "Rent score report shared with you",
+      paragraphs: ["A renter has shared a RentSure rent score with you. The shared score is shown below."],
+      sectionHtml: scorePanel, ctaLabel: recipientAccount ? "View shared report" : "Create account",
+      ctaUrl: `${env.APP_WEB_BASE_URL.replace(/\/+$/, "")}${sharePath}` })
   });
 
   return {

@@ -1,3 +1,4 @@
+import { notifyUser } from "../notifications/notifications.service";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
@@ -550,6 +551,10 @@ export async function resetPasswordWithToken(input: { rawToken: string; password
     throw new AppError("Password reset token is not attached to an account", 500, "TOKEN_ERROR");
   }
 
+  await notifyUser({ recipientAccountId: token.publicAccountId ?? undefined, recipientStaffId: token.userId ?? undefined,
+    event: "STAKEHOLDER_UPDATE", eventKey: `password-reset:${token.id}`, title: "Password changed",
+    message: "Your RentSure password was changed and existing sessions were revoked. If this was not you, reset your password immediately.",
+    actionUrl: "/login" });
   return { success: true };
 }
 
@@ -586,6 +591,11 @@ async function attachPendingAgentInvites(publicAccount: Pick<PublicAccount, "id"
 
   if (!pendingInvites.length) return;
 
+  for (const invite of pendingInvites) await notifyUser({ recipientAccountId: publicAccount.id,
+    event: "AGENT_INVITE", eventKey: `attached-agent-invite:${invite.id}`, title: "Property invitation waiting",
+    message: "A landlord invited you to manage a property. Open Properties to accept or decline the invitation.",
+    actionUrl: `/account/properties?propertyId=${invite.propertyId}` });
+
   await prisma.propertyAgentInvite.updateMany({
     where: {
       recipientEmail: publicAccount.email,
@@ -609,6 +619,10 @@ async function attachPendingRenterLinks(publicAccount: Pick<PublicAccount, "id" 
   });
 
   if (!pendingLinks.length) return;
+
+  for (const link of pendingLinks) await notifyUser({ recipientAccountId: publicAccount.id,
+    event: "PROPERTY_LINKED", eventKey: `attached-renter-link:${link.id}`, title: "Property link waiting",
+    message: "You have a property link request. Open Linked Properties to review and respond.", actionUrl: `/account/renter/cases?caseId=${link.id}` });
 
   await prisma.proposedRenter.updateMany({
     where: {
@@ -676,7 +690,21 @@ export async function completePublicAccountSignup(input: {
   }
 
   await attachPendingAgentInvites(updatedAccount);
+  if (updatedAccount.accountType !== "RENTER") {
+    const shares = await prisma.renterScoreShare.findMany({ where: { recipientEmail: updatedAccount.email, recipientType: updatedAccount.accountType, recipientAccountId: null } });
+    for (const share of shares) {
+      await prisma.$transaction(async tx => {
+        await tx.renterScoreShare.update({ where: { id: share.id }, data: { recipientAccountId: updatedAccount.id } });
+        await notifyUser({ db: tx, recipientAccountId: updatedAccount.id, event: "STAKEHOLDER_UPDATE", eventKey: `attached-score-share:${share.id}`,
+          title: "Rent Score shared with you", message: `A renter shared a Rent Score of ${share.score}/${share.maxScore} with you. This is the score at the time it was shared.`, actionUrl: "/account/notifications" });
+      });
+    }
+  }
 
+
+  await notifyUser({ recipientAccountId: updatedAccount.id, event: "VERIFICATION_COMPLETE", eventKey: `account-activated:${updatedAccount.id}`,
+    title: "Your RentSure account is ready", message: "Your email is verified and your account setup is complete. Open your profile to finish your details.",
+    actionUrl: updatedAccount.accountType === "RENTER" ? "/account/renter/profile" : "/account/profile" });
   const session = await createPublicSession(updatedAccount);
   const onboardingRoute =
     updatedAccount.accountType === "RENTER"
@@ -889,6 +917,7 @@ export async function changeStaffPassword(input: {
     }
   });
 
+  await notifyUser({ recipientStaffId: input.userId, event: "STAKEHOLDER_UPDATE", title: "Password changed",
+    message: "Your RentSure password was changed. If you did not make this change, reset your password from the sign-in page.", actionUrl: "/login" });
   return { success: true };
 }
-

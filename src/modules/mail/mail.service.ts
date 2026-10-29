@@ -22,6 +22,7 @@ export async function sendTransactionalMail(input: {
   to: string;
   subject: string;
   html: string;
+  idempotencyKey?: string;
 }) {
   const preview = createMailPreview({
     category: input.category,
@@ -69,6 +70,7 @@ export async function sendTransactionalMail(input: {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        ...(input.idempotencyKey ? { "Idempotency-Key": input.idempotencyKey } : {}),
         Authorization: `Bearer ${env.RESEND_API_KEY}`,
         "User-Agent": "rentsure-backend/1.0"
       },
@@ -136,4 +138,3 @@ export async function sendTransactionalMail(input: {
     previewUrl: process.env.NODE_ENV === "production" ? null : preview.previewUrl
   };
 }
-
