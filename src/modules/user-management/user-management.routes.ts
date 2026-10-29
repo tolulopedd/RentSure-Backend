@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
+import { managedUserParamsSchema } from "./user-management.validation";
 import { AppError } from "../../common/errors/AppError";
 import { writeAuditLog } from "../../common/audit/audit";
 import { requireAuth } from "../../middleware/auth.middleware";
@@ -88,7 +89,7 @@ router.get("/admin/customers/export", requireAuth, async (req, res, next) => {
 router.get("/admin/users/:id", requireAuth, async (req, res, next) => {
   try {
     await requireAdminPermission(req.user!.userId, "VIEW");
-    const params = z.object({ id: z.string().uuid() }).parse(req.params);
+    const params = managedUserParamsSchema.parse(req.params);
     res.json(await getManagedUser(params.id));
   } catch (error) {
     next(parseError(error, "Invalid user request"));
@@ -98,7 +99,7 @@ router.get("/admin/users/:id", requireAuth, async (req, res, next) => {
 router.patch("/admin/users/:id", requireAuth, async (req, res, next) => {
   try {
     await requireAdminPermission(req.user!.userId, "EDIT");
-    const params = z.object({ id: z.string().uuid() }).parse(req.params);
+    const params = managedUserParamsSchema.parse(req.params);
     const optionalText = (max: number, min = 0) => z.preprocess(
       (value) => value === "" ? undefined : value,
       z.string().trim().min(min).max(max).optional()
@@ -125,7 +126,7 @@ router.patch("/admin/users/:id", requireAuth, async (req, res, next) => {
 router.post("/admin/users/:id/status", requireAuth, async (req, res, next) => {
   try {
     await requireAdminPermission(req.user!.userId, "STATUS");
-    const params = z.object({ id: z.string().uuid() }).parse(req.params);
+    const params = managedUserParamsSchema.parse(req.params);
     const body = z.object({ action: z.enum(["ACTIVATE", "DEACTIVATE", "SUSPEND", "UNSUSPEND", "BLOCK"]), reason: z.string().trim().max(500).optional() }).parse(req.body);
     if (["DEACTIVATE", "SUSPEND", "BLOCK"].includes(body.action) && !body.reason) {
       throw new AppError("A reason is required for this status change", 400, "VALIDATION_ERROR");
@@ -144,7 +145,7 @@ router.post("/admin/users/:id/status", requireAuth, async (req, res, next) => {
 router.post("/admin/users/:id/resend-verification", requireAuth, async (req, res, next) => {
   try {
     await requireAdminPermission(req.user!.userId, "EDIT");
-    const params = z.object({ id: z.string().uuid() }).parse(req.params);
+    const params = managedUserParamsSchema.parse(req.params);
     const result = await resendManagedUserVerification(params.id);
     await writeAuditLog({ req, action: "admin.user.resend_verification", entity: "UserManagement", entityId: params.id });
     res.json(result);
@@ -156,7 +157,7 @@ router.post("/admin/users/:id/resend-verification", requireAuth, async (req, res
 router.post("/admin/users/:id/send-password-reset", requireAuth, async (req, res, next) => {
   try {
     await requireAdminPermission(req.user!.userId, "EDIT");
-    const params = z.object({ id: z.string().uuid() }).parse(req.params);
+    const params = managedUserParamsSchema.parse(req.params);
     const result = await sendManagedUserPasswordReset(params.id);
     await writeAuditLog({ req, action: "admin.user.send_password_reset", entity: "UserManagement", entityId: params.id });
     res.json(result);
@@ -168,7 +169,7 @@ router.post("/admin/users/:id/send-password-reset", requireAuth, async (req, res
 router.patch("/admin/users/:id/admin-role", requireAuth, async (req, res, next) => {
   try {
     await requireAdminPermission(req.user!.userId, "ROLE");
-    const params = z.object({ id: z.string().uuid() }).parse(req.params);
+    const params = managedUserParamsSchema.parse(req.params);
     const body = z.object({ adminRole: adminRoleSchema }).parse(req.body);
     const result = await changeAdminRole(params.id, body.adminRole);
     await writeAuditLog({ req, action: "admin.role.change", entity: "User", entityId: params.id, meta: body });
@@ -181,7 +182,7 @@ router.patch("/admin/users/:id/admin-role", requireAuth, async (req, res, next) 
 router.post("/admin/users/:id/notes", requireAuth, async (req, res, next) => {
   try {
     await requireAdminPermission(req.user!.userId, "EDIT");
-    const params = z.object({ id: z.string().uuid() }).parse(req.params);
+    const params = managedUserParamsSchema.parse(req.params);
     const body = z.object({ note: z.string().trim().min(1).max(2000) }).parse(req.body);
     const result = await addAdminNote(params.id, req.user!.userId, body.note);
     await writeAuditLog({ req, action: "admin.note.create", entity: "UserManagement", entityId: params.id, meta: { note: body.note } });

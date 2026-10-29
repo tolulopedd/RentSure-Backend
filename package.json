@@ -17,7 +17,8 @@
     "test:rent-score": "ts-node-dev --exit-child --transpile-only src/scripts/test-rent-score-engine.ts",
     "test:notifications": "ts-node-dev --exit-child --transpile-only src/scripts/test-notifications.ts",
     "test:messaging": "ts-node-dev --exit-child --transpile-only src/scripts/test-messaging.ts",
-    "test:score-metrics": "ts-node-dev --exit-child --transpile-only src/scripts/test-score-metric-propagation.ts"
+    "test:score-metrics": "ts-node-dev --exit-child --transpile-only src/scripts/test-score-metric-propagation.ts",
+    "test:managed-user-ids": "ts-node-dev --exit-child --transpile-only src/scripts/test-managed-user-ids.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.19.2",
